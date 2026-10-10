@@ -22,6 +22,18 @@ class VideoRenderer(ctx: Context) {
     private var videoWidth = 0
     private var videoHeight = 0
     private var firstFrameQueued = false
+    @Volatile private var firstFrameNotified = false
+
+    var onFirstFrame: (() -> Unit)? = null
+
+    init {
+        pipeline.onFrameRendered = {
+            if (!firstFrameNotified) {
+                firstFrameNotified = true
+                onFirstFrame?.invoke()
+            }
+        }
+    }
 
     // stats
     @Volatile var fps = 0; private set
@@ -83,7 +95,10 @@ class VideoRenderer(ctx: Context) {
             .reduceOrNull { (w1, h1), (w2, h2) -> minOf(w1, w2) to minOf(h1, h2) } ?: (1920 to 1080)
 
     // codec per mirror session; pipeline persists across sessions
-    fun startSession() = synchronized(lock) { _resetStats() }
+    fun startSession() = synchronized(lock) {
+        firstFrameNotified = false
+        _resetStats()
+    }
 
     fun stopSession() = synchronized(lock) { stopCodec() }
 

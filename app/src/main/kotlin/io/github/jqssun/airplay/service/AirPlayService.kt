@@ -74,6 +74,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private var wakeLock: PowerManager.WakeLock? = null
     private var foregroundStarted = false
     private var lastOrientation = Configuration.ORIENTATION_UNDEFINED
+    @Volatile private var pendingMainActivityLaunch = false
 
     val videoRenderer = VideoRenderer(this)
     val audioRenderer = AudioRenderer()
@@ -207,6 +208,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onCreate() {
         super.onCreate()
+        videoRenderer.onFirstFrame = { launchPendingMainActivity() }
         createNotificationChannel()
         dacpController = DacpController(this)
         dacpPlayer = DacpPlayer(
@@ -607,6 +609,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onVideoPlay(location: String, startPositionSeconds: Float) {
+        launchPendingMainActivity()
         _videoLocation.value = location
         _videoPlaySeq.value++
         _videoPollSuppressed = false
@@ -633,6 +636,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onAudioFormat(ct: Int, spf: Int, usingScreen: Boolean) {
         clearPin()
+        if (!usingScreen) launchPendingMainActivity()
         audioRenderer.start()
         audioRenderer.setFormat(ct, spf)
         if (!usingScreen) _setPlaying(true)
@@ -719,12 +723,16 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         // onDisplayPin, otherwise the server ui can move before the client pin is current
         if (requiresPin()) return
         if (!shouldLaunchOnConnect()) return
-        launchMainActivity()
+        pendingMainActivityLaunch = true
     }
 
     override fun onConnectionDestroy() {
         _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
         if (_connectionCount.value == 0) {
+            pendingMainActivityLaunch = false
+            _mainHandler.post {
+                if (_connectionCount.value == 0) MainActivity.requestReturnToBackground()
+            }
             // clients may drop without POST /stop; must run before the poll-state reset
             _endVideoPlayback("AirPlay Video stopped (disconnect)")
             // last client gone: release audio output devices to save power
@@ -1071,14 +1079,26 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private fun launchMainActivity() {
         Handler(Looper.getMainLooper()).post {
+            val returnToBackground = !MainActivity.isVisible()
             val launchIntent = Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                .addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+                .putExtra(MainActivity.EXTRA_RETURN_TO_BACKGROUND, returnToBackground)
             try {
                 startActivity(launchIntent)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to launch activity", e)
             }
         }
+    }
+
+    private fun launchPendingMainActivity() {
+        if (!pendingMainActivityLaunch) return
+        pendingMainActivityLaunch = false
+        if (!MainActivity.isVisible()) launchMainActivity()
     }
 
     private fun _mediaAction(action: String): PendingIntent {

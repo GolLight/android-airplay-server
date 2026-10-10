@@ -30,12 +30,34 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import java.lang.ref.WeakReference
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        const val EXTRA_RETURN_TO_BACKGROUND =
+            "io.github.jqssun.airplay.extra.RETURN_TO_BACKGROUND"
+
+        @Volatile
+        private var visibleActivity = WeakReference<MainActivity>(null)
+
+        @Volatile
+        private var activityVisible = false
+
+        fun isVisible(): Boolean = activityVisible
+
+        fun requestReturnToBackground() {
+            visibleActivity.get()?.let { activity ->
+                activity.runOnUiThread { activity.moveToBackgroundIfNeeded() }
+            }
+        }
+    }
+
     private val viewModel: MainViewModel by viewModels()
     private var service: AirPlayService? = null
+    private var returnToBackgroundAfterDisconnect = false
+    private val autoSession = mutableStateOf(false)
     val isInPip = mutableStateOf(false)
     private val logCallback: (String) -> Unit = { viewModel.addLog(it) }
     private val pinCallback: (String?) -> Unit = { viewModel.showPin(it) }
@@ -63,6 +85,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        returnToBackgroundAfterDisconnect =
+            intent.getBooleanExtra(EXTRA_RETURN_TO_BACKGROUND, false)
+        autoSession.value = returnToBackgroundAfterDisconnect
         enableEdgeToEdge()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -109,6 +134,7 @@ class MainActivity : ComponentActivity() {
             AirPlayTheme {
                 MainScreen(
                     viewModel = viewModel,
+                    autoSession = autoSession.value,
                     isInPip = isInPip.value,
                     onSurfaceAvailable = { viewModel.onSurfaceAvailable(it) },
                     onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
@@ -116,6 +142,14 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        returnToBackgroundAfterDisconnect =
+            intent.getBooleanExtra(EXTRA_RETURN_TO_BACKGROUND, false)
+        autoSession.value = returnToBackgroundAfterDisconnect
     }
 
     fun enterPip() {
@@ -135,7 +169,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun _shouldAutoPip(): Boolean =
-        viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
+        // Android TV can leave the receiver in a tiny PiP window when a sender
+        // connects while the app task is backgrounded. Keep PiP as an explicit
+        // action on TV; automatic PiP remains available on handheld devices.
+        (resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) != Configuration.UI_MODE_TYPE_TELEVISION &&
+            viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
             viewModel.connectionCount.value > 0
 
     override fun onUserLeaveHint() {
@@ -148,14 +186,30 @@ class MainActivity : ComponentActivity() {
         isInPip.value = inPip
     }
 
+    override fun onStart() {
+        super.onStart()
+        visibleActivity = WeakReference(this)
+        activityVisible = true
+    }
+
     override fun onStop() {
         super.onStop()
+        if (visibleActivity.get() === this) {
+            visibleActivity = WeakReference(null)
+            activityVisible = false
+        }
         // never stop mid-session
         if (!viewModel.runInBackground.value && !isChangingConfigurations &&
             viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
             viewModel.connectionCount.value == 0) {
             viewModel.stopServer()
         }
+    }
+
+    private fun moveToBackgroundIfNeeded() {
+        if (!returnToBackgroundAfterDisconnect || isFinishing || isChangingConfigurations) return
+        returnToBackgroundAfterDisconnect = false
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {

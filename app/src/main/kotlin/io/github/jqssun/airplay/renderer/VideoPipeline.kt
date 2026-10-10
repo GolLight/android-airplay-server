@@ -35,6 +35,7 @@ class VideoPipeline {
 
     private var surfaceTexture: SurfaceTexture? = null
     var inputSurface: Surface? = null; private set
+    var onFrameRendered: (() -> Unit)? = null
 
     @Volatile private var frameAvailable = false
     private var pendingDisplay: Surface? = null
@@ -135,7 +136,9 @@ class VideoPipeline {
             // no display: keep consuming so decoder doesn't stall
             egl.makeCurrent()
             st.updateTexImage()
+            st.getTransformMatrix(texMatrix)
             hasFrame = true
+            onFrameRendered?.invoke()
             return
         }
         egl.makeCurrent(window)
@@ -143,6 +146,7 @@ class VideoPipeline {
         st.getTransformMatrix(texMatrix)
         hasFrame = true
         _render()
+        onFrameRendered?.invoke()
     }
 
     private fun _render() {

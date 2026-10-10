@@ -85,13 +85,14 @@ private enum class Tab(val labelRes: Int, val icon: ImageVector) {
 @Composable
 fun MainScreen(
     viewModel: MainViewModel,
+    autoSession: Boolean = false,
     isInPip: Boolean = false,
     onSurfaceAvailable: (android.view.Surface) -> Unit,
     onSurfaceDestroyed: (android.view.Surface) -> Unit,
     onPip: () -> Unit = {}
 ) {
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
-    var fullscreen by remember { mutableStateOf(false) }
+    var fullscreen by remember(autoSession) { mutableStateOf(autoSession) }
     val pin by viewModel.pinCode.collectAsState()
     val connections by viewModel.connectionCount.collectAsState()
     val audioOnly by viewModel.audioOnly.collectAsState()
@@ -121,13 +122,17 @@ fun MainScreen(
     }
 
     // manual fullscreen over the idle preview is deliberate; only undo on disconnect
-    LaunchedEffect(connections) {
-        if (connections == 0) fullscreen = false
+    LaunchedEffect(connections, autoSession) {
+        if (connections == 0 && !autoSession) fullscreen = false
     }
 
     // leaving video playback must not fall through to a stale mirroring fullscreen
     LaunchedEffect(videoPlaybackActive) {
         if (videoPlaybackActive) fullscreen = false
+    }
+
+    LaunchedEffect(autoSession, audioOnly, videoPlaybackActive) {
+        if (autoSession && (audioOnly || videoPlaybackActive)) fullscreen = false
     }
 
     val activity = LocalContext.current as? Activity
