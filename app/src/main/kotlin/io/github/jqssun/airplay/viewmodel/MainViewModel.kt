@@ -6,11 +6,13 @@ import android.content.Intent
 import android.media.AudioManager
 import android.os.SystemClock
 import android.view.Surface
+import android.graphics.Bitmap
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
 import io.github.jqssun.airplay.Prefs
+import io.github.jqssun.airplay.DlnaSettings
 import io.github.jqssun.airplay.audio.TrackInfo
 import io.github.jqssun.airplay.service.AirPlayService
 import io.github.jqssun.airplay.service.AirPlayService.ServerState
@@ -106,6 +108,9 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     private val _serverName = MutableStateFlow(prefs.getString(Prefs.SERVER_NAME, Prefs.DEF_SERVER_NAME)!!)
     val serverName: StateFlow<String> = _serverName.asStateFlow()
+
+    private val _dlnaEnabled = MutableStateFlow(DlnaSettings.isEnabled(app))
+    val dlnaEnabled: StateFlow<Boolean> = _dlnaEnabled.asStateFlow()
 
     // settings
     private val _serverPort = MutableStateFlow(prefs.getInt(Prefs.SERVER_PORT, Prefs.DEF_SERVER_PORT))
@@ -217,6 +222,12 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     private val _videoPlaybackActive = MutableStateFlow(false)
     val videoPlaybackActive: StateFlow<Boolean> = _videoPlaybackActive.asStateFlow()
+
+    private val _dlnaActive = MutableStateFlow(false)
+    val dlnaActive: StateFlow<Boolean> = _dlnaActive.asStateFlow()
+
+    private val _dlnaImage = MutableStateFlow<Bitmap?>(null)
+    val dlnaImage: StateFlow<Bitmap?> = _dlnaImage.asStateFlow()
 
     // video channel polling but /play not received yet
     private val _videoSessionPending = MutableStateFlow(false)
@@ -361,6 +372,11 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     fun setServerPort(port: Int) { _serverPort.value = port; prefs.edit().putInt(Prefs.SERVER_PORT, port).apply(); _applyByServerRestart() }
     fun setServerName(name: String) { _serverName.value = name; prefs.edit().putString(Prefs.SERVER_NAME, name).apply(); _applyByServerRestart() }
+    fun setDlnaEnabled(enabled: Boolean) {
+        _dlnaEnabled.value = enabled
+        DlnaSettings.setEnabled(getApplication(), enabled)
+        _applyByServerRestart()
+    }
     fun setAutoStart(v: Boolean) { _autoStart.value = v; prefs.edit().putBoolean(Prefs.AUTO_START, v).apply() }
     fun setBootAutoStart(v: Boolean) { _bootAutoStart.value = v; prefs.edit().putBoolean(Prefs.BOOT_AUTO_START, v).apply() }
     fun setRunInBackground(v: Boolean) { _runInBackground.value = v; prefs.edit().putBoolean(Prefs.RUN_IN_BACKGROUND, v).apply() }
@@ -516,6 +532,14 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
         service?.stopVideoPlayback()
     }
 
+    fun playDlna() { service?.playDlna() }
+    fun pauseDlna() { service?.pauseDlna() }
+    fun seekDlna(positionMs: Long) { service?.seekDlna(positionMs) }
+    fun stopDlna() { service?.stopDlna() }
+    fun dlnaVolumeUp() { service?.dlnaVolumeUp() }
+    fun dlnaVolumeDown() { service?.dlnaVolumeDown() }
+    fun dlnaMuteToggle() { service?.dlnaMuteToggle() }
+
     fun setVideoSpeed(speed: Float) {
         val value = speed.coerceIn(0.2f, 4f)
         _videoSpeed.value = value
@@ -568,9 +592,12 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
                 _videoScrubPositionMs.value = null
             }
             _videoPlaybackActive.value = videoActive
+            _dlnaActive.value = it.dlnaActive.value
+            _dlnaImage.value = it.dlnaImage.value
             _videoSessionPending.value = it.videoSessionPending()
             _videoDownloadProgress.value = it.videoDownloader.progress.value
-            if (videoActive) {
+            val dlnaAudio = it.dlnaActive.value && it.audioOnly.value
+            if (videoActive || dlnaAudio) {
                 val info = it.videoPlaybackInfo.value
                 _videoPositionMs.value = info.positionMs
                 _videoDurationMs.value = info.durationMs
@@ -579,8 +606,10 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
                     _videoSkipSilence.value = info.skipSilence
                 }
                 _videoBuffering.value = info.buffering
-                _videoPlaybackAspect.value = it.videoPlaybackAspect.value
-                _videoPlaybackSize.value = it.videoPlaybackSize.value
+                if (videoActive) {
+                    _videoPlaybackAspect.value = it.videoPlaybackAspect.value
+                    _videoPlaybackSize.value = it.videoPlaybackSize.value
+                }
                 // stream metadata first, dmap second; senders rarely provide either for video
                 _videoTitle.value = it.videoTitle.value.ifEmpty { it.trackInfo.value.title }
                 _videoLocation.value = it.videoLocation.value

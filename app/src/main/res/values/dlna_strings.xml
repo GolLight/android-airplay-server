@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="setting_dlna">DLNA 投放</string>
+    <string name="setting_dlna_desc">允许安卓和 Windows 的 DLNA 应用投放视频、音乐和图片</string>
+    <string name="dlna_image">DLNA 图片</string>
+    <string name="dlna_play">播放</string>
+    <string name="dlna_pause">暂停</string>
+    <string name="dlna_stop">停止</string>
+</resources>

@@ -96,6 +96,7 @@ fun MainScreen(
     val pin by viewModel.pinCode.collectAsState()
     val connections by viewModel.connectionCount.collectAsState()
     val audioOnly by viewModel.audioOnly.collectAsState()
+    val dlnaActive by viewModel.dlnaActive.collectAsState()
     val videoPlaybackActive by viewModel.videoPlaybackActive.collectAsState()
     val videoSessionPending by viewModel.videoSessionPending.collectAsState()
     val mirroringActive by viewModel.mirroringActive.collectAsState()
@@ -122,8 +123,8 @@ fun MainScreen(
     }
 
     // manual fullscreen over the idle preview is deliberate; only undo on disconnect
-    LaunchedEffect(connections, autoSession) {
-        if (connections == 0 && !autoSession) fullscreen = false
+    LaunchedEffect(connections, dlnaActive, autoSession) {
+        if (connections == 0 && !dlnaActive && !autoSession) fullscreen = false
     }
 
     // leaving video playback must not fall through to a stale mirroring fullscreen
@@ -520,7 +521,7 @@ fun MainScreen(
                 Column {
                     AudioMiniController(
                         viewModel,
-                        visible = audioOnly && connections > 0 && tab != Tab.OVERVIEW,
+                        visible = audioOnly && connections > 0 && !dlnaActive && tab != Tab.OVERVIEW,
                         onClick = { tab = Tab.OVERVIEW }
                     )
                     NavigationBar {
@@ -601,9 +602,13 @@ private fun OverviewContent(
     val idlePreview by viewModel.idlePreview.collectAsState()
     val mirroringActive by viewModel.mirroringActive.collectAsState()
     val videoPlaybackActive by viewModel.videoPlaybackActive.collectAsState()
+    val dlnaActive by viewModel.dlnaActive.collectAsState()
+    val dlnaImage by viewModel.dlnaImage.collectAsState()
     val debugEnabled by viewModel.debugEnabled.collectAsState()
     val debugInfo by viewModel.debugInfo.collectAsState()
     val tv = isTv()
+    val activeConnections = if (dlnaActive) maxOf(1, connections) else connections
+    val hasSession = activeConnections > 0
     val startFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         if (tv) startFocus.requestFocus()
@@ -620,18 +625,25 @@ private fun OverviewContent(
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
         ) {
-            val connecting = state == ServerState.RUNNING && connections > 0 &&
-                !mirroringActive && !videoPlaybackActive
-            if (showAudioMode && state == ServerState.RUNNING && connections > 0) {
+            val connecting = state == ServerState.RUNNING && hasSession &&
+                !mirroringActive && !videoPlaybackActive && dlnaImage == null
+            if (showAudioMode && state == ServerState.RUNNING && hasSession) {
                 NowPlayingContent(viewModel)
             } else {
-                if (state == ServerState.RUNNING && (mirroringActive || idlePreview)) {
+                if (dlnaImage != null) {
+                    Image(
+                        bitmap = dlnaImage!!.asImageBitmap(),
+                        contentDescription = stringResource(R.string.dlna_image),
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
+                    )
+                } else if (state == ServerState.RUNNING && (mirroringActive || idlePreview)) {
                     video()
                 }
-                if (state != ServerState.RUNNING || connections == 0) {
+                if (state != ServerState.RUNNING || !hasSession) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
-                            imageVector = if (connections > 0) Icons.Default.CastConnected else Icons.Default.Cast,
+                            imageVector = if (hasSession) Icons.Default.CastConnected else Icons.Default.Cast,
                             contentDescription = null,
                             modifier = Modifier.size(64.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
@@ -671,7 +683,7 @@ private fun OverviewContent(
                     }
                 }
             }
-            if (debugEnabled && connections > 0) {
+            if (debugEnabled && hasSession) {
                 DebugOverlay(debugInfo, Modifier.align(Alignment.TopStart).padding(8.dp))
             }
             var showRes by remember { mutableStateOf(false) }
@@ -684,7 +696,7 @@ private fun OverviewContent(
             }
             if (!showAudioMode) {
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = showRes && connections > 0,
+                    visible = showRes && hasSession,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
                 ) {
                     Text(
@@ -725,7 +737,7 @@ private fun OverviewContent(
                         )
                         Text(
                             text = when (state) {
-                                ServerState.RUNNING -> stringResource(R.string.connected_count, connections)
+                                ServerState.RUNNING -> stringResource(R.string.connected_count, activeConnections)
                                 ServerState.ERROR -> stringResource(R.string.error_label)
                                 ServerState.STOPPED -> stringResource(R.string.stopped_label)
                             },
@@ -871,6 +883,10 @@ private fun AudioMiniController(viewModel: MainViewModel, visible: Boolean, onCl
 @AndroidxOptIn(UnstableApi::class)
 private fun NowPlayingContent(viewModel: MainViewModel) {
     val track by viewModel.trackInfo.collectAsState()
+    val dlnaActive by viewModel.dlnaActive.collectAsState()
+    val playing by viewModel.videoPlaying.collectAsState()
+    val positionMs by viewModel.videoPositionMs.collectAsState()
+    val durationMs by viewModel.videoDurationMs.collectAsState()
 
     Column(
         modifier = Modifier
@@ -938,7 +954,50 @@ private fun NowPlayingContent(viewModel: MainViewModel) {
         Spacer(Modifier.height(16.dp))
 
         val player = viewModel.dacpPlayer
-        if (player != null) {
+        if (dlnaActive) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(formatVideoTime(positionMs), modifier = Modifier.padding(end = 8.dp))
+                LinearProgressIndicator(
+                    progress = { if (durationMs > 0) positionMs.toFloat() / durationMs else 0f },
+                    modifier = Modifier.weight(1f)
+                )
+                Text(formatVideoTime(durationMs), modifier = Modifier.padding(start = 8.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                IconButton(onClick = { viewModel.seekDlna((positionMs - 10_000L).coerceAtLeast(0L)) }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.Default.Replay10, stringResource(R.string.cd_rewind))
+                }
+                IconButton(onClick = { if (playing) viewModel.pauseDlna() else viewModel.playDlna() }, modifier = Modifier.dpadFocus()) {
+                    Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, if (playing) stringResource(R.string.dlna_pause) else stringResource(R.string.dlna_play))
+                }
+                IconButton(onClick = { viewModel.seekDlna(positionMs + 10_000L) }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.Default.Forward10, stringResource(R.string.cd_fast_forward))
+                }
+                IconButton(onClick = { viewModel.stopDlna() }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.Default.Stop, stringResource(R.string.dlna_stop))
+                }
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                IconButton(onClick = { viewModel.dlnaVolumeDown() }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.AutoMirrored.Rounded.VolumeDown, stringResource(R.string.cd_volume_down))
+                }
+                IconButton(onClick = { viewModel.dlnaMuteToggle() }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.AutoMirrored.Rounded.VolumeOff, stringResource(R.string.cd_mute))
+                }
+                IconButton(onClick = { viewModel.dlnaVolumeUp() }, modifier = Modifier.dpadFocus()) {
+                    Icon(Icons.AutoMirrored.Rounded.VolumeUp, stringResource(R.string.cd_volume_up))
+                }
+            }
+        } else if (player != null) {
             // BottomControls' default row, minus its video-overlay gradient
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 PositionText(player, Modifier.padding(end = 8.dp))

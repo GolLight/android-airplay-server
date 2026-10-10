@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.os.Binder
@@ -32,6 +33,7 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import io.github.jqssun.airplay.MainActivity
+import io.github.jqssun.airplay.DlnaSettings
 import io.github.jqssun.airplay.Prefs
 import io.github.jqssun.airplay.R
 import io.github.jqssun.airplay.realDisplaySize
@@ -47,7 +49,12 @@ import io.github.jqssun.airplay.discovery.NsdServiceManager
 import io.github.jqssun.airplay.download.VideoDownloader
 import io.github.jqssun.airplay.renderer.AirPlayVideoPlayer
 import io.github.jqssun.airplay.renderer.AudioRenderer
+import io.github.jqssun.airplay.renderer.DlnaMedia
+import io.github.jqssun.airplay.renderer.DlnaMediaPlayer
+import io.github.jqssun.airplay.renderer.DlnaMediaType
+import io.github.jqssun.airplay.renderer.DlnaPlayerSnapshot
 import io.github.jqssun.airplay.renderer.VideoRenderer
+import io.github.jqssun.airplay.service.dlna.DlnaReceiver
 import io.github.jqssun.airplay.viewmodel.DebugInfo
 import java.net.NetworkInterface
 import java.security.SecureRandom
@@ -80,7 +87,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     val audioRenderer = AudioRenderer()
     private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
     val airPlayVideoPlayer by lazy { AirPlayVideoPlayer(this) }
+    private val dlnaPlayer by lazy { DlnaMediaPlayer(this) }
     val videoDownloader by lazy { VideoDownloader(this) }
+    private var dlnaReceiver: DlnaReceiver? = null
 
     // hls urls point at the native httpd, valid only while the session lives
     private val _videoLocation = MutableStateFlow<String?>(null)
@@ -123,6 +132,12 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     // container/manifest metadata
     private val _videoTitle = MutableStateFlow("")
     val videoTitle = _videoTitle.asStateFlow()
+
+    private val _dlnaActive = MutableStateFlow(false)
+    val dlnaActive = _dlnaActive.asStateFlow()
+
+    private val _dlnaImage = MutableStateFlow<Bitmap?>(null)
+    val dlnaImage = _dlnaImage.asStateFlow()
 
     // recent /playback-info polls with no playback = pending video; polls start ~1s before /play
     @Volatile private var _lastVideoPollAt = 0L
@@ -209,6 +224,43 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     override fun onCreate() {
         super.onCreate()
         videoRenderer.onFirstFrame = { launchPendingMainActivity() }
+        dlnaPlayer.setListener(object : DlnaMediaPlayer.Listener {
+            override fun onSnapshot(snapshot: DlnaPlayerSnapshot) {
+                _onDlnaSnapshot(snapshot)
+            }
+
+            override fun onFirstVideoFrame() {
+                launchPendingMainActivity()
+            }
+
+            override fun onVideoSize(width: Int, height: Int) {
+                if (width > 0 && height > 0) {
+                    _videoPlaybackAspect.value = width.toFloat() / height.toFloat()
+                    _videoPlaybackSize.value = width to height
+                }
+            }
+
+            override fun onImageReady(bitmap: Bitmap) {
+                _dlnaImage.value = bitmap
+                launchPendingMainActivity()
+            }
+
+            override fun onArtworkReady(bitmap: Bitmap) {
+                if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.AUDIO) {
+                    _trackInfo.value = _trackInfo.value.copy(coverArt = bitmap)
+                    _updateMediaMetadata()
+                }
+            }
+
+            override fun onEnded() {
+                _stopDlnaPlayback("DLNA playback ended", returnToBackground = true)
+            }
+
+            override fun onError(message: String) {
+                log(message)
+                _stopDlnaPlayback("DLNA playback failed", returnToBackground = true)
+            }
+        })
         createNotificationChannel()
         dacpController = DacpController(this)
         dacpPlayer = DacpPlayer(
@@ -229,6 +281,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         mediaSession = MediaSessionCompat(this, "AirPlay").apply {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
+                    if (_dlnaActive.value) {
+                        dlnaPlayer.resume()
+                        return
+                    }
                     if (_videoPlaybackActive.value) {
                         airPlayVideoPlayer.setPlaying(true)
                         return
@@ -237,6 +293,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                     dacpController?.play()
                 }
                 override fun onPause() {
+                    if (_dlnaActive.value) {
+                        dlnaPlayer.pause()
+                        return
+                    }
                     if (_videoPlaybackActive.value) {
                         airPlayVideoPlayer.setPlaying(false)
                         return
@@ -245,15 +305,31 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                     dacpController?.pause()
                 }
                 override fun onStop() {
+                    if (_dlnaActive.value) {
+                        _stopDlnaPlayback("DLNA playback stopped (media session)", returnToBackground = true)
+                        return
+                    }
                     if (_videoPlaybackActive.value) stopVideoPlayback()
                 }
                 override fun onFastForward() {
+                    if (_dlnaActive.value) {
+                        dlnaPlayer.seek(dlnaPlayer.snapshot().positionMs + VIDEO_SEEK_STEP_MS)
+                        return
+                    }
                     if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(VIDEO_SEEK_STEP_MS)
                 }
                 override fun onRewind() {
+                    if (_dlnaActive.value) {
+                        dlnaPlayer.seek(dlnaPlayer.snapshot().positionMs - VIDEO_SEEK_STEP_MS)
+                        return
+                    }
                     if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(-VIDEO_SEEK_STEP_MS)
                 }
                 override fun onSeekTo(pos: Long) {
+                    if (_dlnaActive.value) {
+                        dlnaPlayer.seek(pos)
+                        return
+                    }
                     if (_videoPlaybackActive.value) airPlayVideoPlayer.scrub(pos / 1000f)
                 }
                 override fun onSkipToNext() {
@@ -432,6 +508,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
         nsdManager?.registerAirplay(resolvedName, port, airplayTxt)
 
+        if (DlnaSettings.isEnabled(this)) {
+            startDlna(resolvedName)
+        }
+
         _serverState.value = ServerState.RUNNING
         if (ensureServiceStarted) {
             ContextCompat.startForegroundService(this, Intent(this, AirPlayService::class.java))
@@ -460,6 +540,174 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         // strict decoders black-screen past their limits; advertised size is only upper bound for senders
         val (maxW, maxH) = videoRenderer.maxResolution()
         return w.coerceAtMost(maxW) to h.coerceAtMost(maxH)
+    }
+
+    private fun startDlna(name: String) {
+        if (dlnaReceiver != null) return
+        dlnaReceiver = DlnaReceiver(
+            friendlyName = name,
+            uuid = DlnaSettings.stableUuid(this),
+            callback = object : DlnaReceiver.Callback {
+                override fun onSetMedia(media: DlnaMedia): Boolean {
+                    if (hasAirPlaySession()) {
+                        log("DLNA request rejected while AirPlay is active")
+                        return false
+                    }
+                    _mainHandler.post { _prepareDlnaMedia(media) }
+                    return true
+                }
+
+                override fun onPlay() {
+                    _mainHandler.post {
+                        dlnaPlayer.resume()
+                        pendingMainActivityLaunch = true
+                    }
+                }
+
+                override fun onPause() {
+                    _mainHandler.post { dlnaPlayer.pause() }
+                }
+
+                override fun onStop() {
+                    _mainHandler.post { _stopDlnaPlayback("DLNA playback stopped", returnToBackground = true) }
+                }
+
+                override fun onSeek(positionMs: Long) {
+                    _mainHandler.post { dlnaPlayer.seek(positionMs) }
+                }
+
+                override fun onSetVolume(percent: Int) {
+                    _mainHandler.post { dlnaPlayer.setVolume(percent) }
+                }
+
+                override fun onSetMute(muted: Boolean) {
+                    _mainHandler.post { dlnaPlayer.setMute(muted) }
+                }
+
+                override fun snapshot(): DlnaPlayerSnapshot = dlnaPlayer.snapshot()
+
+                override fun log(message: String) = this@AirPlayService.log(message)
+            }
+        ).also { it.start() }
+    }
+
+    private fun hasAirPlaySession(): Boolean =
+        _connectionCount.value > 0 || _mirroringActive.value || (_audioOnly.value && !_dlnaActive.value)
+
+    private fun _prepareDlnaMedia(media: DlnaMedia) {
+        if (hasAirPlaySession()) return
+        val previous = dlnaPlayer.snapshot().media
+        if (previous?.uri != media.uri) {
+            _videoPlaySeq.value++
+            _videoPlaybackAspect.value = 16f / 9f
+            _videoPlaybackSize.value = null
+            _videoTitle.value = media.title
+            _videoLocation.value = media.uri
+        }
+        _dlnaActive.value = true
+        _dlnaImage.value = null
+        when (media.type) {
+            DlnaMediaType.VIDEO -> {
+                _videoPlaybackActive.value = true
+                _videoPlaybackInfo.value = VideoPlaybackInfo(playing = false)
+                _audioOnly.value = false
+            }
+            DlnaMediaType.AUDIO -> {
+                _videoPlaybackActive.value = false
+                _audioOnly.value = true
+                _trackInfo.value = TrackInfo(title = media.title, artist = media.artist, album = media.album)
+                _positionMs.value = 0L
+                _durationMs.value = 0L
+                mediaSession?.isActive = true
+            }
+            DlnaMediaType.IMAGE -> {
+                _videoPlaybackActive.value = false
+                _audioOnly.value = false
+            }
+        }
+        dlnaPlayer.setMedia(media)
+        _refreshDacpPlayer()
+        _updateMediaNotification()
+    }
+
+    private fun _onDlnaSnapshot(snapshot: DlnaPlayerSnapshot) {
+        val media = snapshot.media
+        dlnaReceiver?.updateSnapshot(snapshot)
+        if (media == null) {
+            _dlnaActive.value = false
+            _dlnaImage.value = null
+            _videoPlaybackActive.value = false
+            if (_audioOnly.value) _setAudioOnly(false)
+            _updateMediaNotification()
+            return
+        }
+        _dlnaActive.value = true
+        when (media.type) {
+            DlnaMediaType.VIDEO -> {
+                _videoPlaybackActive.value = true
+                _audioOnly.value = false
+                _videoLocation.value = media.uri
+                _videoTitle.value = media.title
+                _videoPlaybackInfo.value = VideoPlaybackInfo(
+                    positionMs = snapshot.positionMs,
+                    durationMs = snapshot.durationMs,
+                    playing = snapshot.state == "PLAYING",
+                    buffering = snapshot.state == "TRANSITIONING",
+                )
+            }
+            DlnaMediaType.AUDIO -> {
+                _videoPlaybackActive.value = false
+                _audioOnly.value = true
+                if (snapshot.state == "PLAYING" || snapshot.state == "PAUSED_PLAYBACK") {
+                    launchPendingMainActivity()
+                }
+                _trackInfo.value = _trackInfo.value.copy(
+                    title = media.title,
+                    artist = media.artist,
+                    album = media.album,
+                )
+                _positionMs.value = snapshot.positionMs
+                _durationMs.value = snapshot.durationMs
+                _playing.value = snapshot.state == "PLAYING"
+                _videoPlaybackInfo.value = VideoPlaybackInfo(
+                    positionMs = snapshot.positionMs,
+                    durationMs = snapshot.durationMs,
+                    playing = snapshot.state == "PLAYING",
+                    buffering = snapshot.state == "TRANSITIONING",
+                )
+                _updatePlaybackState()
+            }
+            DlnaMediaType.IMAGE -> {
+                _videoPlaybackActive.value = false
+                _audioOnly.value = false
+                _dlnaImage.value = snapshot.image
+                if (snapshot.image != null && snapshot.state == "PLAYING") {
+                    launchPendingMainActivity()
+                }
+            }
+        }
+        _refreshDacpPlayer()
+        _updateMediaNotification()
+    }
+
+    private fun _stopDlnaPlayback(message: String, returnToBackground: Boolean) {
+        if (!_dlnaActive.value && dlnaPlayer.snapshot().media == null) return
+        dlnaPlayer.stop()
+        _dlnaActive.value = false
+        _dlnaImage.value = null
+        _videoPlaybackActive.value = false
+        _audioOnly.value = false
+        _trackInfo.value = TrackInfo()
+        _positionMs.value = 0L
+        _durationMs.value = 0L
+        mediaSession?.isActive = false
+        if (returnToBackground) {
+            _mainHandler.post {
+                if (_connectionCount.value == 0) MainActivity.requestReturnToBackground()
+            }
+        }
+        log(message)
+        _updateMediaNotification()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -491,6 +739,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun stopServer() {
+        dlnaReceiver?.stop()
+        dlnaReceiver = null
+        dlnaPlayer.stop()
+        _dlnaActive.value = false
+        _dlnaImage.value = null
         audioRenderer.detachEngine()
         if (nativeHandle != 0L) {
             NativeBridge.nativeStop(nativeHandle)
@@ -533,38 +786,81 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun setVideoPlaybackSurface(surface: Surface) {
-        airPlayVideoPlayer.setSurface(surface)
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            dlnaPlayer.setSurface(surface)
+        } else {
+            airPlayVideoPlayer.setSurface(surface)
+        }
     }
 
     fun clearVideoPlaybackSurface(surface: Surface) {
-        airPlayVideoPlayer.clearSurface(surface)
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            dlnaPlayer.clearSurface(surface)
+        } else {
+            airPlayVideoPlayer.clearSurface(surface)
+        }
     }
 
     fun setVideoPlaying(playing: Boolean) {
-        airPlayVideoPlayer.setPlaying(playing)
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            if (playing) dlnaPlayer.resume() else dlnaPlayer.pause()
+        } else {
+            airPlayVideoPlayer.setPlaying(playing)
+        }
     }
 
     fun seekVideoTo(positionMs: Long) {
-        airPlayVideoPlayer.scrub(positionMs / 1000f)
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            dlnaPlayer.seek(positionMs)
+        } else {
+            airPlayVideoPlayer.scrub(positionMs / 1000f)
+        }
     }
 
     fun setVideoScrubbing(enabled: Boolean) {
-        airPlayVideoPlayer.setScrubbing(enabled)
+        if (!_dlnaActive.value) airPlayVideoPlayer.setScrubbing(enabled)
     }
 
     fun setVideoSpeed(speed: Float) {
-        airPlayVideoPlayer.setSpeed(speed)
+        if (!_dlnaActive.value) airPlayVideoPlayer.setSpeed(speed)
     }
 
     fun setVideoSkipSilence(enabled: Boolean) {
-        airPlayVideoPlayer.setSkipSilence(enabled)
+        if (!_dlnaActive.value) airPlayVideoPlayer.setSkipSilence(enabled)
     }
 
     fun seekVideoBy(deltaMs: Long) {
-        airPlayVideoPlayer.seekBy(deltaMs)
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            val snapshot = dlnaPlayer.snapshot()
+            dlnaPlayer.seek(snapshot.positionMs + deltaMs)
+        } else {
+            airPlayVideoPlayer.seekBy(deltaMs)
+        }
     }
 
-    fun stopVideoPlayback() = _endVideoPlayback("AirPlay Video stopped (local)")
+    fun stopVideoPlayback() {
+        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+            _stopDlnaPlayback("DLNA playback stopped (local)", returnToBackground = true)
+        } else {
+            _endVideoPlayback("AirPlay Video stopped (local)")
+        }
+    }
+
+    fun playDlna() = dlnaPlayer.resume()
+    fun pauseDlna() = dlnaPlayer.pause()
+    fun seekDlna(positionMs: Long) = dlnaPlayer.seek(positionMs)
+    fun stopDlna() = _stopDlnaPlayback("DLNA playback stopped (local)", returnToBackground = true)
+    fun dlnaVolumeUp() {
+        val s = dlnaPlayer.snapshot()
+        dlnaPlayer.setVolume(s.volume + 5)
+    }
+    fun dlnaVolumeDown() {
+        val s = dlnaPlayer.snapshot()
+        dlnaPlayer.setVolume(s.volume - 5)
+    }
+    fun dlnaMuteToggle() {
+        dlnaPlayer.setMute(!dlnaPlayer.snapshot().muted)
+    }
 
     fun downloadVideo() {
         _videoLocation.value?.let { videoDownloader.start(it) }
@@ -582,6 +878,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onDestroy() {
         stopServer()
+        dlnaPlayer.release()
         dacpPlayer.release()
         mediaReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) {}
@@ -609,6 +906,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onVideoPlay(location: String, startPositionSeconds: Float) {
+        if (_dlnaActive.value) _stopDlnaPlayback("DLNA replaced by AirPlay", returnToBackground = false)
         launchPendingMainActivity()
         _videoLocation.value = location
         _videoPlaySeq.value++
@@ -636,6 +934,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onAudioFormat(ct: Int, spf: Int, usingScreen: Boolean) {
         clearPin()
+        if (_dlnaActive.value) _stopDlnaPlayback("DLNA replaced by AirPlay", returnToBackground = false)
         if (!usingScreen) launchPendingMainActivity()
         audioRenderer.start()
         audioRenderer.setFormat(ct, spf)

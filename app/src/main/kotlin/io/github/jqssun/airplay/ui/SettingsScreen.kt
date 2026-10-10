@@ -36,6 +36,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
     val serverName by viewModel.serverName.collectAsState()
+    val dlnaEnabled by viewModel.dlnaEnabled.collectAsState()
     val h265Enabled by viewModel.h265Enabled.collectAsState()
     val enforceSdr by viewModel.enforceSdr.collectAsState()
     val alacEnabled by viewModel.alacEnabled.collectAsState()
@@ -89,6 +90,13 @@ fun SettingsScreen(viewModel: MainViewModel) {
             value = serverPort.toString(),
             onCommit = { viewModel.setServerPort(it.toInt()) },
             range = 1..65535
+        )
+
+        SettingSwitch(
+            title = stringResource(R.string.setting_dlna),
+            description = stringResource(R.string.setting_dlna_desc),
+            checked = dlnaEnabled,
+            onCheckedChange = { viewModel.setDlnaEnabled(it) }
         )
 
         SettingSwitch(
