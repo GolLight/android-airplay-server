@@ -147,8 +147,15 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     value = launchOnConnect,
                     role = Role.Switch,
                     onValueChange = {
-                        viewModel.setLaunchOnConnect(it)
-                        if (it && !canAutoLaunch(ctx)) ctx.startActivity(_overlayIntent(ctx))
+                        if (it && !canAutoLaunch(ctx)) {
+                            // Keep the preference enabled while the user is
+                            // completing the system overlay permission flow.
+                            // Tapping the row again must reopen the settings
+                            // page instead of silently turning the feature off.
+                            ctx.startActivity(_overlayIntent(ctx))
+                        } else {
+                            viewModel.setLaunchOnConnect(it)
+                        }
                     }
                 ),
             headlineContent = { Text(stringResource(R.string.setting_launch_on_connect)) },

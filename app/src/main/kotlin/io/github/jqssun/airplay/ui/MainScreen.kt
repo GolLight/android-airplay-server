@@ -1,21 +1,32 @@
 package io.github.jqssun.airplay.ui
 
 import android.app.Activity
+import android.graphics.Bitmap
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.text.Html
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn as AndroidxOptIn
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
@@ -23,10 +34,18 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.BrightnessHigh
 import androidx.compose.material3.*
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.*
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -40,13 +59,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import android.content.Context
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.github.jqssun.airplay.R
+import io.github.jqssun.airplay.audio.TrackInfo
 import io.github.jqssun.airplay.service.AirPlayService.ServerState
 import io.github.jqssun.airplay.ui.gestures.BrightnessState
 import io.github.jqssun.airplay.ui.gestures.DoubleTapIndicator
@@ -74,7 +96,11 @@ import androidx.media3.ui.compose.material3.indicator.DurationText
 import androidx.media3.ui.compose.material3.indicator.PositionText
 import androidx.media3.ui.compose.material3.indicator.ProgressSlider
 import kotlin.math.abs
+import kotlin.math.roundToLong
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import org.json.JSONArray
+import org.json.JSONObject
 
 private enum class Tab(val labelRes: Int, val icon: ImageVector) {
     OVERVIEW(R.string.tab_overview, Icons.Default.Cast),
@@ -86,6 +112,7 @@ private enum class Tab(val labelRes: Int, val icon: ImageVector) {
 fun MainScreen(
     viewModel: MainViewModel,
     autoSession: Boolean = false,
+    playbackLaunchId: Long = 0L,
     isInPip: Boolean = false,
     onSurfaceAvailable: (android.view.Surface) -> Unit,
     onSurfaceDestroyed: (android.view.Surface) -> Unit,
@@ -93,6 +120,12 @@ fun MainScreen(
 ) {
     var tab by remember { mutableStateOf(Tab.OVERVIEW) }
     var fullscreen by remember(autoSession) { mutableStateOf(autoSession) }
+    LaunchedEffect(playbackLaunchId) {
+        if (playbackLaunchId > 0L) {
+            viewModel.updateFromService()
+            fullscreen = true
+        }
+    }
     val pin by viewModel.pinCode.collectAsState()
     val connections by viewModel.connectionCount.collectAsState()
     val audioOnly by viewModel.audioOnly.collectAsState()
@@ -133,7 +166,14 @@ fun MainScreen(
     }
 
     LaunchedEffect(autoSession, audioOnly, videoPlaybackActive) {
-        if (autoSession && (audioOnly || videoPlaybackActive)) fullscreen = false
+        if (autoSession && videoPlaybackActive) fullscreen = false
+    }
+
+    // Both music protocols share the same full-screen presentation.
+    LaunchedEffect(audioOnly, dlnaActive, connections, videoPlaybackActive) {
+        if (audioOnly && (dlnaActive || connections > 0)) {
+            fullscreen = true
+        }
     }
 
     val activity = LocalContext.current as? Activity
@@ -151,12 +191,23 @@ fun MainScreen(
 
     if (videoScreen) {
         val videoPlaybackAspect by viewModel.videoPlaybackAspect.collectAsState()
+        val videoPreview by viewModel.dlnaVideoPreview.collectAsState()
         val playback: @Composable () -> Unit = {
-            VideoSurfaceView(
-                onSurfaceAvailable = { viewModel.onVideoPlaybackSurfaceAvailable(it) },
-                onSurfaceDestroyed = { viewModel.onVideoPlaybackSurfaceDestroyed(it) },
-                aspectRatio = videoPlaybackAspect
-            )
+            Box(contentAlignment = Alignment.Center) {
+                VideoSurfaceView(
+                    onSurfaceAvailable = { viewModel.onVideoPlaybackSurfaceAvailable(it) },
+                    onSurfaceDestroyed = { viewModel.onVideoPlaybackSurfaceDestroyed(it) },
+                    aspectRatio = videoPlaybackAspect
+                )
+                videoPreview?.let { preview ->
+                    Image(
+                        bitmap = preview.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.FillBounds,
+                        modifier = Modifier.aspectRatio(videoPlaybackAspect, matchHeightConstraintsFirst = videoPlaybackAspect < 1f).fillMaxSize(),
+                    )
+                }
+            }
         }
         if (isInPip) {
             Box(
@@ -509,12 +560,20 @@ fun MainScreen(
 
     if (fullscreen) {
         BackHandler { fullscreen = false }
-        FullscreenVideo(
-            viewModel = viewModel,
-            video = video,
-            onExitFullscreen = { fullscreen = false },
-            onPip = onPip
-        )
+        if (audioOnly) {
+            FullscreenMusic(
+                viewModel = viewModel,
+                isInPip = isInPip,
+                onExitFullscreen = { fullscreen = false },
+            )
+        } else {
+            FullscreenVideo(
+                viewModel = viewModel,
+                video = video,
+                onExitFullscreen = { fullscreen = false },
+                onPip = onPip
+            )
+        }
     } else {
         Scaffold(
             bottomBar = {
@@ -881,12 +940,919 @@ private fun AudioMiniController(viewModel: MainViewModel, visible: Boolean, onCl
 
 @Composable
 @AndroidxOptIn(UnstableApi::class)
+private fun FullscreenMusic(
+    viewModel: MainViewModel,
+    isInPip: Boolean,
+    onExitFullscreen: () -> Unit,
+) {
+    MusicNowPlayingContent(
+        viewModel = viewModel,
+        fullScreen = true,
+        isInPip = isInPip,
+        onExitFullscreen = onExitFullscreen,
+    )
+}
+
+private data class DlnaLyricLine(
+    val timestampMs: Long?,
+    val text: String,
+)
+
+private val DLNA_LRC_TIMESTAMP = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
+private val DLNA_YRC_LINE = Regex("""\{\s*\"t\"\s*:\s*(\d+)\s*,\s*\"c\"\s*:\s*\Q[\E(.*?)\Q]\E\s*\}""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+private val DLNA_YRC_TEXT = Regex("""\"tx\"\s*:\s*\"((?:\\\\.|[^\"\\\\])*)\"""")
+
+private fun decodeJsonString(value: String): String = runCatching {
+    org.json.JSONTokener("\"$value\"").nextValue() as String
+}.getOrDefault(value)
+
+private fun findLyricsInJson(value: Any?): String? {
+    when (value) {
+        is JSONObject -> {
+            // NetEase and several DLNA senders wrap LRC/YRC in lrc, yrc or
+            // lyrics objects. Prefer the original timed lyric over translation.
+            listOf("lrc", "yrc", "lyrics", "lyric", "unsyncedLyrics", "tlyric", "klyric").forEach { key ->
+                val child = value.opt(key)
+                val found = when (child) {
+                    is String -> child.takeIf { it.isNotBlank() }
+                    else -> findLyricsInJson(child)
+                }
+                if (!found.isNullOrBlank()) return found
+            }
+            val keys = value.keys()
+            while (keys.hasNext()) {
+                findLyricsInJson(value.opt(keys.next()))?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+        }
+        is JSONArray -> {
+            for (index in 0 until value.length()) {
+                findLyricsInJson(value.opt(index))?.takeIf { it.isNotBlank() }?.let { return it }
+            }
+        }
+    }
+    return null
+}
+
+private fun lyricPayload(raw: String): String {
+    var value = raw.trim()
+    repeat(2) {
+        if (value.startsWith("<![CDATA[") && value.endsWith("]]>") && value.length >= 12) {
+            value = value.substring(9, value.length - 3).trim()
+        }
+        // Keep JSON escape sequences intact until JSONObject has decoded the
+        // payload; converting \\n inside a JSON string first would invalidate it.
+        if (value.contains('<') && value.contains('>')) {
+            // Preserve plain-text LRC line breaks; Html.fromHtml() collapses them.
+            value = Html.fromHtml(value, Html.FROM_HTML_MODE_LEGACY).toString().trim()
+        }
+    }
+    val jsonLyrics = runCatching { findLyricsInJson(JSONObject(value)) }.getOrNull()
+        ?: value.takeIf { it.startsWith("[") || it.contains("\"t\"") }
+    return (jsonLyrics ?: value).let(::decodeJsonString)
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+}
+
+private fun parseDlnaLyrics(raw: String): List<DlnaLyricLine> {
+    if (raw.isBlank()) return emptyList()
+    // DLNA metadata commonly uses HTML <br> tags or an LRC payload. Decode
+    // both forms so the renderer can lay out each lyric line separately.
+    val decoded = lyricPayload(raw)
+        .replace(Regex("(?i)<br\\s*/?>"), "\n")
+        .replace('\r', '\n')
+        .replace('\u2028', '\n')
+
+    // NetEase's YRC endpoint returns one JSON object per line with a
+    // millisecond timestamp and one or more {"tx": "..."} fragments.
+    val yrcLines = DLNA_YRC_LINE.findAll(decoded).mapNotNull { match ->
+        val timestamp = match.groupValues[1].toLongOrNull() ?: return@mapNotNull null
+        val text = DLNA_YRC_TEXT.findAll(match.groupValues[2])
+            .joinToString(separator = "") { decodeJsonString(it.groupValues[1]) }
+            .trim()
+        text.takeIf { it.isNotBlank() }?.let { DlnaLyricLine(timestamp, it) }
+    }.toList()
+    if (yrcLines.isNotEmpty()) return yrcLines.sortedBy { it.timestampMs ?: Long.MAX_VALUE }
+
+    return decoded.lineSequence().flatMap { rawLine ->
+        val line = rawLine.trim()
+        if (line.isBlank()) return@flatMap emptySequence()
+        val timestamps = DLNA_LRC_TIMESTAMP.findAll(line).toList()
+        val text = line.replace(DLNA_LRC_TIMESTAMP, "").trim()
+        if (text.isBlank()) return@flatMap emptySequence()
+        if (timestamps.isEmpty()) {
+            sequenceOf(DlnaLyricLine(timestampMs = null, text = text))
+        } else {
+            timestamps.asSequence().map { match ->
+                val minutes = match.groupValues[1].toLongOrNull() ?: 0L
+                val seconds = match.groupValues[2].toLongOrNull() ?: 0L
+                val fractionText = match.groupValues[3].padEnd(3, '0').take(3)
+                val fractionMs = fractionText.toLongOrNull() ?: 0L
+                DlnaLyricLine(
+                    timestampMs = minutes * 60_000L + seconds * 1_000L + fractionMs,
+                    text = text,
+                )
+            }
+        }
+    }.toList()
+}
+
+private fun activeDlnaLyricIndex(lines: List<DlnaLyricLine>, positionMs: Long): Int {
+    var timed = false
+    var active = 0
+    var latest = Long.MIN_VALUE
+    lines.forEachIndexed { index, line ->
+        val timestamp = line.timestampMs ?: return@forEachIndexed
+        timed = true
+        if (timestamp <= positionMs && timestamp > latest) {
+            latest = timestamp
+            active = index
+        }
+    }
+    return if (timed) active else -1
+}
+
+@Composable
+private fun DlnaCoverArt(track: TrackInfo, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (track.coverArt != null) {
+            Image(
+                bitmap = track.coverArt!!.asImageBitmap(),
+                contentDescription = stringResource(R.string.cd_cover_art),
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Icon(
+                Icons.Default.MusicNote,
+                contentDescription = null,
+                modifier = Modifier.size(64.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DlnaVinylArt(
+    coverArt: Bitmap?,
+    playing: Boolean,
+    visible: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val coverImage = remember(coverArt) { coverArt?.asImageBitmap() }
+    var rotation by remember { mutableFloatStateOf(0f) }
+    // The composable is also used while the activity is transitioning to
+    // PiP/background. Stop the frame clock immediately in those states.
+    LaunchedEffect(playing, visible) {
+        if (!playing || !visible) return@LaunchedEffect
+        var lastFrame = withFrameNanos { it }
+        while (isActive) {
+            val frame = withFrameNanos { it }
+            rotation = (rotation + (frame - lastFrame) / 1_000_000_000f * 9f) % 360f
+            lastFrame = frame
+        }
+    }
+    Box(
+        modifier = modifier.shadow(24.dp, CircleShape).padding(8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        // The grooves and outer shading are rotationally symmetrical, so keep
+        // them in a static layer. This prevents a full Canvas redraw on every
+        // animation tick; only the album-art layer below receives rotation.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithCache {
+                    val radius = size.minDimension / 2f
+                    val discBrush = Brush.radialGradient(
+                        listOf(Color(0xFF222226), Color(0xFF070709), Color(0xFF161619)),
+                    )
+                    val ringColors = List(52) { ring ->
+                        Color.White.copy(alpha = if (ring % 3 == 0) 0.055f else 0.025f)
+                    }
+                    val ringStroke = 0.6.dp.toPx()
+                    val edgeStroke = 1.dp.toPx()
+                    onDrawBehind {
+                        drawCircle(discBrush, radius)
+                        repeat(52) { ring ->
+                            drawCircle(
+                                color = ringColors[ring],
+                                radius = radius * (0.65f + ring * 0.0065f),
+                                style = Stroke(width = ringStroke),
+                            )
+                        }
+                        drawCircle(
+                            Color.White.copy(alpha = 0.12f),
+                            radius - edgeStroke,
+                            style = Stroke(edgeStroke),
+                        )
+                    }
+                },
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize(0.62f)
+                .clip(CircleShape)
+                .background(Color(0xFF343438)),
+            contentAlignment = Alignment.Center,
+        ) {
+            // Rotate only the cover image. The record grooves, shadow and
+            // center background remain cached and visually unchanged.
+            Box(
+                modifier = Modifier.fillMaxSize().graphicsLayer { rotationZ = rotation },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (coverImage != null) {
+                    Image(
+                        coverImage,
+                        stringResource(R.string.cd_cover_art),
+                        Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Icon(Icons.Default.MusicNote, null, Modifier.size(64.dp), tint = Color.White.copy(alpha = 0.65f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DlnaTrackMetadata(track: TrackInfo, large: Boolean, light: Boolean = false) {
+    val titleColor = if (light) Color.White else LocalContentColor.current
+    val secondaryColor = if (light) Color.White.copy(alpha = 0.78f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val artistAlbum = listOf(track.artist, track.album)
+        .filter(String::isNotBlank)
+        .joinToString(" · ")
+    Column(verticalArrangement = Arrangement.spacedBy(if (large) 6.dp else 2.dp)) {
+        Text(
+            text = track.title.ifEmpty { stringResource(R.string.unknown_track) },
+            style = if (large) MaterialTheme.typography.titleLarge else MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = titleColor,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (artistAlbum.isNotEmpty()) {
+            Text(
+                text = artistAlbum,
+                style = if (large) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
+                color = secondaryColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DlnaLyrics(
+    lines: List<DlnaLyricLine>,
+    activeIndex: Int,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    modifier: Modifier,
+    large: Boolean,
+    light: Boolean = false,
+    live: Boolean = false,
+) {
+    if (lines.isEmpty()) {
+        // Keep the viewport's size even when there is no lyric text. The
+        // fullscreen transport row is laid out after this viewport; removing
+        // it entirely would make the controls jump toward the center.
+        Spacer(modifier)
+        return
+    }
+    val current = activeIndex.takeIf { it in lines.indices } ?: lines.lastIndex
+    val liveTailOffset = if (live && current == lines.lastIndex) 10.dp else 0.dp
+    // Keep individual rows alive. Replacing/fading the whole viewport causes
+    // a blank gap on every packet and makes already-late live lyrics feel later.
+    BoxWithConstraints(modifier = modifier.offset(y = liveTailOffset).clipToBounds()) {
+        val rowHeight = if (large) {
+            (maxHeight / 4).coerceIn(46.dp, 60.dp)
+        } else {
+            (maxHeight / 4).coerceIn(38.dp, 50.dp)
+        }
+        val rowPx = with(LocalDensity.current) { rowHeight.toPx() }
+        var positioned by remember(listState) { mutableStateOf(false) }
+        LaunchedEffect(current, rowPx, listState, live) {
+            if (!positioned) {
+                listState.scrollToItem(current)
+                positioned = true
+            } else {
+                val scroll = listState.firstVisibleItemIndex * rowPx + listState.firstVisibleItemScrollOffset
+                val distance = current * rowPx - scroll
+                if (abs(distance) > rowPx * 3) listState.scrollToItem(current)
+                else listState.animateScrollBy(distance, tween(if (live) 140 else 340))
+            }
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = false,
+            contentPadding = PaddingValues(vertical = ((maxHeight - rowHeight) / 2).coerceAtLeast(0.dp)),
+        ) {
+            itemsIndexed(lines, key = { index, line -> "${line.timestampMs}:$index" }) { index, line ->
+                val baseColor = if (light) Color.White else MaterialTheme.colorScheme.onSurface
+                val opacity = when {
+                    index == current -> 1f
+                    abs(index - current) == 1 -> 0.58f
+                    else -> 0.32f
+                }
+                // The new current line is visible at once. Only old lines fade
+                // to their secondary color while the list travels one row.
+                val animatedColor by animateColorAsState(baseColor.copy(alpha = opacity), tween(220), label = "lyric-color")
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(rowHeight),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = line.text,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center,
+                        style = if (large) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (index == current) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (index == current) baseColor else animatedColor,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberDlnaTransportFocus(): DlnaTransportFocus = remember { DlnaTransportFocus() }
+
+private class DlnaTransportFocus {
+    val rewind = FocusRequester()
+    val play = FocusRequester()
+    val forward = FocusRequester()
+    val stop = FocusRequester()
+}
+
+@Composable
+private fun DlnaProgressBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit,
+    seekEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val progress = if (durationMs > 0L) {
+        (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    var dragging by remember { mutableStateOf(false) }
+    var dragProgress by remember { mutableFloatStateOf(progress) }
+    val seek by rememberUpdatedState(onSeek)
+
+    fun seekAt(fraction: Float) {
+        if (!seekEnabled || durationMs <= 0L) return
+        seek((fraction.coerceIn(0f, 1f) * durationMs).roundToLong())
+    }
+
+    val displayedProgress = if (dragging) dragProgress else progress
+    Column(modifier = modifier) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(28.dp)
+                .pointerInput(durationMs, seekEnabled) {
+                    if (!seekEnabled) return@pointerInput
+                    detectTapGestures { offset ->
+                        val fraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        dragProgress = fraction
+                        seekAt(fraction)
+                    }
+                }
+                .pointerInput(durationMs, seekEnabled) {
+                    if (!seekEnabled) return@pointerInput
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            dragging = true
+                            dragProgress = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            seekAt(dragProgress)
+                        },
+                        onDragEnd = {
+                            dragging = false
+                            seekAt(dragProgress)
+                        },
+                        onDragCancel = { dragging = false },
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            val next = (dragProgress + dragAmount.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            dragProgress = next
+                            seekAt(next)
+                        },
+                    )
+                },
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.White.copy(alpha = 0.28f)),
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(displayedProgress)
+                    .height(4.dp)
+                    .align(Alignment.CenterStart)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.White),
+            )
+            Box(
+                modifier = Modifier
+                    .size(if (dragging) 16.dp else 12.dp)
+                    .offset(x = maxWidth * displayedProgress - if (dragging) 8.dp else 6.dp)
+                    .align(Alignment.CenterStart)
+                    .background(Color.White, CircleShape),
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(formatVideoTime(if (dragging) (dragProgress * durationMs).roundToLong() else positionMs), color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.labelMedium)
+            Text(formatVideoTime(durationMs), color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+@Composable
+private fun DlnaTransportControls(
+    viewModel: MainViewModel,
+    playing: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    volume: Int,
+    muted: Boolean,
+    fullScreen: Boolean,
+    showVolumeFeedback: Boolean,
+    focus: DlnaTransportFocus,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    val dlnaActive by viewModel.dlnaActive.collectAsState()
+    val sender = viewModel.dacpPlayer
+    CompositionLocalProvider(
+        LocalContentColor provides if (fullScreen) Color.White else LocalContentColor.current,
+    ) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (fullScreen) {
+                DlnaProgressBar(
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    onSeek = { if (dlnaActive) viewModel.seekDlna(it) },
+                    seekEnabled = dlnaActive,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Text(
+                    formatVideoTime(positionMs),
+                    color = LocalContentColor.current,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+                LinearProgressIndicator(
+                    progress = { if (durationMs > 0) positionMs.toFloat() / durationMs else 0f },
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    formatVideoTime(durationMs),
+                    color = LocalContentColor.current,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(if (fullScreen) {
+                if (compact) 18.dp else 36.dp
+            } else 14.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            IconButton(
+                onClick = { if (dlnaActive) viewModel.seekDlnaBy(-10_000L) else sender?.seekToPreviousMediaItem() },
+                modifier = Modifier
+                    .size(if (fullScreen) {
+                        if (compact) 48.dp else 64.dp
+                    } else 48.dp)
+                    .focusRequester(focus.rewind)
+                    .focusProperties {
+                        left = focus.rewind
+                        right = focus.play
+                        up = focus.rewind
+                        down = focus.rewind
+                    }
+                    .dpadFocus(),
+            ) {
+                Icon(
+                    if (dlnaActive) Icons.Default.Replay10 else Icons.Default.SkipPrevious,
+                    stringResource(R.string.cd_rewind),
+                    modifier = Modifier.size(if (fullScreen) {
+                        if (compact) 28.dp else 36.dp
+                    } else 24.dp),
+                    tint = if (fullScreen) Color.White else LocalContentColor.current,
+                )
+            }
+            FilledIconButton(
+                onClick = {
+                    if (dlnaActive) { if (playing) viewModel.pauseDlna() else viewModel.playDlna() }
+                    else { if (playing) sender?.pause() else sender?.play() }
+                },
+                colors = if (fullScreen) {
+                    IconButtonDefaults.filledIconButtonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = Color.White,
+                    )
+                } else {
+                    IconButtonDefaults.filledIconButtonColors()
+                },
+                modifier = Modifier
+                    .size(if (fullScreen) {
+                        if (compact) 60.dp else 80.dp
+                    } else 48.dp)
+                    .focusRequester(focus.play)
+                    .focusProperties {
+                        left = focus.rewind
+                        right = focus.forward
+                        up = focus.play
+                        down = focus.play
+                    }
+                    .dpadFocus(CircleShape),
+            ) {
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    if (playing) stringResource(R.string.dlna_pause) else stringResource(R.string.dlna_play),
+                    modifier = Modifier.size(if (fullScreen) {
+                        if (compact) 38.dp else 52.dp
+                    } else 26.dp),
+                    tint = if (fullScreen) Color.White else LocalContentColor.current,
+                )
+            }
+            IconButton(
+                onClick = { if (dlnaActive) viewModel.seekDlnaBy(10_000L) else sender?.seekToNextMediaItem() },
+                modifier = Modifier
+                    .size(if (fullScreen) {
+                        if (compact) 48.dp else 64.dp
+                    } else 48.dp)
+                    .focusRequester(focus.forward)
+                    .focusProperties {
+                        left = focus.play
+                        right = focus.stop
+                        up = focus.forward
+                        down = focus.forward
+                    }
+                    .dpadFocus(),
+            ) {
+                Icon(
+                    if (dlnaActive) Icons.Default.Forward10 else Icons.Default.SkipNext,
+                    stringResource(R.string.cd_fast_forward),
+                    modifier = Modifier.size(if (fullScreen) {
+                        if (compact) 28.dp else 36.dp
+                    } else 24.dp),
+                    tint = if (fullScreen) Color.White else LocalContentColor.current,
+                )
+            }
+            IconButton(
+                onClick = { if (dlnaActive) viewModel.stopDlna() else sender?.pause() },
+                modifier = Modifier
+                    .focusRequester(focus.stop)
+                    .focusProperties {
+                        left = focus.forward
+                        right = focus.stop
+                        up = focus.stop
+                        down = focus.forward
+                    }
+                    .dpadFocus(),
+            ) {
+                Icon(Icons.Default.Stop, stringResource(R.string.dlna_stop), tint = if (fullScreen) Color.White else LocalContentColor.current)
+            }
+        }
+        if (showVolumeFeedback) {
+            Surface(
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.align(Alignment.CenterHorizontally),
+            ) {
+                Text(
+                    text = if (muted) stringResource(R.string.dlna_volume, 0) + " · 静音" else stringResource(R.string.dlna_volume, volume),
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+        }
+    }
+    }
+}
+
+@Composable
+private fun MusicNowPlayingContent(
+    viewModel: MainViewModel,
+    fullScreen: Boolean,
+    isInPip: Boolean = false,
+    onExitFullscreen: (() -> Unit)?,
+) {
+    val track by viewModel.trackInfo.collectAsState()
+    val playing by viewModel.videoPlaying.collectAsState()
+    val positionMs by viewModel.videoPositionMs.collectAsState()
+    val durationMs by viewModel.videoDurationMs.collectAsState()
+    val dlnaVolume by viewModel.dlnaVolume.collectAsState()
+    val dlnaMuted by viewModel.dlnaMuted.collectAsState()
+    val lyrics = remember(track.lyrics) { parseDlnaLyrics(track.lyrics) }
+    val lyricListState = key(track.title, track.artist) { rememberLazyListState() }
+    val activeLyricIndex = remember(positionMs, lyrics, track.liveLyrics) {
+        if (track.liveLyrics) lyrics.lastIndex else activeDlnaLyricIndex(lyrics, positionMs)
+    }
+    val transportFocus = rememberDlnaTransportFocus()
+    var showVolumeFeedback by remember { mutableStateOf(false) }
+
+    LaunchedEffect(dlnaVolume, dlnaMuted) {
+        showVolumeFeedback = true
+        delay(1_200)
+        showVolumeFeedback = false
+    }
+    if (fullScreen) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF09090B))
+                .safeDrawingPadding(),
+        ) {
+            track.coverArt?.let { coverArt ->
+                Image(
+                    bitmap = coverArt.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = 1.18f
+                            scaleY = 1.18f
+                            alpha = 0.62f
+                        }
+                        .blur(52.dp),
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.Black.copy(alpha = 0.48f),
+                                Color.Black.copy(alpha = 0.58f),
+                                Color.Black.copy(alpha = 0.82f),
+                            ),
+                        ),
+                    ),
+            )
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp, vertical = 28.dp),
+            ) {
+                if (maxHeight > maxWidth) {
+                    // Portrait: keep the title readable at the top, give the
+                    // record and lyrics their own vertical space, and anchor
+                    // the smaller transport row near the bottom edge.
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Spacer(Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            DlnaTrackMetadata(track, large = true, light = true)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                DlnaVinylArt(
+                                    coverArt = track.coverArt,
+                                    playing = playing,
+                                    visible = fullScreen && !isInPip,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.56f)
+                                        .widthIn(max = 220.dp)
+                                        .aspectRatio(1f),
+                                )
+                                DlnaLyrics(
+                                    lines = lyrics,
+                                    activeIndex = activeLyricIndex,
+                                    listState = lyricListState,
+                                    modifier = Modifier.fillMaxWidth().height(112.dp),
+                                    large = false,
+                                    light = true,
+                                live = track.liveLyrics,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        DlnaTransportControls(
+                            viewModel = viewModel,
+                            playing = playing,
+                            positionMs = positionMs,
+                            durationMs = durationMs,
+                            volume = dlnaVolume,
+                            muted = dlnaMuted,
+                            fullScreen = true,
+                            showVolumeFeedback = false,
+                            focus = transportFocus,
+                            compact = true,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        )
+                    }
+                } else {
+                    // Landscape: reserve the right column for metadata and a
+                    // stable lyric viewport so progress and controls cannot
+                    // squeeze the lyric rows into one another.
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(32.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            modifier = Modifier.weight(0.44f).fillMaxHeight(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            DlnaVinylArt(
+                                coverArt = track.coverArt,
+                                playing = playing,
+                                visible = fullScreen && !isInPip,
+                                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+                            )
+                        }
+                        Column(
+                            modifier = Modifier.weight(0.56f).fillMaxHeight().padding(vertical = 14.dp),
+                        ) {
+                            DlnaTrackMetadata(track, large = true, light = true)
+                            Spacer(Modifier.height(12.dp))
+                            DlnaLyrics(
+                                lines = lyrics,
+                                activeIndex = activeLyricIndex,
+                                listState = lyricListState,
+                                modifier = Modifier.weight(1f).fillMaxWidth().padding(vertical = 4.dp),
+                                large = true,
+                                light = true,
+                                live = track.liveLyrics,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            DlnaTransportControls(
+                                viewModel = viewModel,
+                                playing = playing,
+                                positionMs = positionMs,
+                                durationMs = durationMs,
+                                volume = dlnaVolume,
+                                muted = dlnaMuted,
+                                fullScreen = true,
+                                showVolumeFeedback = false,
+                                focus = transportFocus,
+                                compact = true,
+                            )
+                        }
+                    }
+                }
+            }
+            if (onExitFullscreen != null) {
+                IconButton(
+                    onClick = onExitFullscreen,
+                    // Exiting fullscreen is also available through the system
+                    // Back action. Keep this visual affordance out of the TV
+                    // focus order so a newly opened player does not land on
+                    // the top-left arrow before the transport controls.
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 18.dp, top = 12.dp)
+                        .focusProperties { canFocus = false },
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.cd_exit_fullscreen), tint = Color.White.copy(alpha = 0.7f))
+                }
+            }
+            if (showVolumeFeedback) {
+                DlnaVolumeOverlay(
+                    volume = dlnaVolume,
+                    muted = dlnaMuted,
+                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 14.dp),
+                )
+            }
+        }
+    } else {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            DlnaCoverArt(
+                track = track,
+                modifier = Modifier.weight(1f, fill = false).aspectRatio(1f).fillMaxWidth(0.7f),
+            )
+            Spacer(Modifier.height(20.dp))
+            DlnaTrackMetadata(track, large = false)
+            Spacer(Modifier.height(12.dp))
+            DlnaLyrics(
+                lines = lyrics,
+                activeIndex = activeLyricIndex,
+                listState = lyricListState,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp),
+                large = false,
+                live = track.liveLyrics,
+            )
+            Spacer(Modifier.height(16.dp))
+            DlnaTransportControls(
+                viewModel = viewModel,
+                playing = playing,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                volume = dlnaVolume,
+                muted = dlnaMuted,
+                fullScreen = false,
+                showVolumeFeedback = showVolumeFeedback,
+                focus = transportFocus,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DlnaVolumeOverlay(volume: Int, muted: Boolean, modifier: Modifier = Modifier) {
+    val displayedVolume = if (muted) 0 else volume.coerceIn(0, 100)
+    Column(
+        modifier = modifier
+            .width(54.dp)
+            .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(27.dp))
+            .padding(horizontal = 16.dp, vertical = 18.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            if (muted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
+            contentDescription = stringResource(R.string.dlna_volume, displayedVolume),
+            tint = Color.White,
+            modifier = Modifier.size(22.dp),
+        )
+        Box(
+            modifier = Modifier.width(8.dp).height(140.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color.White.copy(alpha = 0.22f)),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(displayedVolume / 100f)
+                    .align(Alignment.BottomCenter)
+                    .background(Color.White, RoundedCornerShape(4.dp)),
+            )
+        }
+        Text("$displayedVolume", color = Color.White, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+@AndroidxOptIn(UnstableApi::class)
 private fun NowPlayingContent(viewModel: MainViewModel) {
     val track by viewModel.trackInfo.collectAsState()
     val dlnaActive by viewModel.dlnaActive.collectAsState()
     val playing by viewModel.videoPlaying.collectAsState()
     val positionMs by viewModel.videoPositionMs.collectAsState()
     val durationMs by viewModel.videoDurationMs.collectAsState()
+    val dlnaVolume by viewModel.dlnaVolume.collectAsState()
+    val dlnaMuted by viewModel.dlnaMuted.collectAsState()
+
+    if (dlnaActive) {
+        MusicNowPlayingContent(viewModel = viewModel, fullScreen = false, onExitFullscreen = null)
+        return
+    }
+
+    var showVolumeFeedback by remember { mutableStateOf(false) }
+
+    LaunchedEffect(dlnaVolume, dlnaMuted) {
+        if (dlnaActive) {
+            showVolumeFeedback = true
+            delay(1_200)
+            showVolumeFeedback = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -932,23 +1898,45 @@ private fun NowPlayingContent(viewModel: MainViewModel) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        if (track.artist.isNotEmpty()) {
+        val artistAlbum = listOf(track.artist, track.album)
+            .filter(String::isNotBlank)
+            .joinToString(" · ")
+        if (artistAlbum.isNotEmpty()) {
             Text(
-                text = track.artist,
+                text = artistAlbum,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
-        if (track.album.isNotEmpty()) {
+
+        if (track.lyrics.isNotBlank()) {
             Text(
-                text = track.album,
+                text = track.lyrics,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 160.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
             )
+        }
+
+        if (dlnaActive && showVolumeFeedback) {
+            Surface(
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.padding(top = 8.dp),
+            ) {
+                Text(
+                    text = if (dlnaMuted) stringResource(R.string.dlna_volume, 0) + " · 静音" else stringResource(R.string.dlna_volume, dlnaVolume),
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))

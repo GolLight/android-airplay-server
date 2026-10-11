@@ -17,6 +17,7 @@ import java.net.MulticastSocket
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -224,8 +225,12 @@ class DlnaReceiver(
                     val colon = line.indexOf(':')
                     if (colon > 0) headers[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
                 }
-                val length = headers["content-length"]?.toIntOrNull()?.coerceIn(0, MAX_BODY_BYTES) ?: 0
-                val body = readBytes(input, length).toString(StandardCharsets.UTF_8)
+                val body = if (headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true) {
+                    readChunkedBytes(input).toString(StandardCharsets.UTF_8)
+                } else {
+                    val length = headers["content-length"]?.toIntOrNull()?.coerceIn(0, MAX_BODY_BYTES) ?: 0
+                    readBytes(input, length).toString(StandardCharsets.UTF_8)
+                }
                 val output = BufferedOutputStream(client.getOutputStream())
                 when {
                     method == "GET" && path == "/description.xml" -> respondXml(output, deviceDescription())
@@ -233,7 +238,10 @@ class DlnaReceiver(
                     method == "POST" && path.startsWith("/upnp/control/") -> handleSoap(output, path.substringAfterLast('/'), headers, body)
                     method == "SUBSCRIBE" && path.startsWith("/upnp/event/") -> handleSubscribe(output, path.substringAfterLast('/'), headers)
                     method == "UNSUBSCRIBE" && path.startsWith("/upnp/event/") -> handleUnsubscribe(output, headers)
-                    else -> respond(output, "404 Not Found", "text/plain", "Not found")
+                    else -> {
+                        Log.i(TAG, "DLNA unhandled request method=$method path=$path bytes=${body.length}")
+                        respond(output, "404 Not Found", "text/plain", "Not found")
+                    }
                 }
                 output.flush()
             } catch (e: Exception) {
@@ -243,55 +251,122 @@ class DlnaReceiver(
     }
 
     private fun handleSoap(output: BufferedOutputStream, service: String, headers: Map<String, String>, body: String) {
-        val action = headers["soapaction"]?.trim('"')?.substringAfterLast('#')
-            ?: tag(body, "Action")?.let { it.substringAfterLast(':') }
+        val serviceName = when (service.lowercase()) {
+            "avtransport", "avtransport1" -> "AVTransport"
+            "renderingcontrol", "renderingcontrol1" -> "RenderingControl"
+            "connectionmanager", "connectionmanager1" -> "ConnectionManager"
+            else -> service
+        }
+        val action = headers["soapaction"]?.trim()?.trim('"', '\'')?.substringAfterLast('#')
+            ?: Regex("<(?:[A-Za-z0-9_]+:)?Body[^>]*>\\s*<(?:[A-Za-z0-9_]+:)?([A-Za-z0-9_]+)", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                .find(body)?.groupValues?.getOrNull(1)
+            ?: tag(body, "Action", caseInsensitive = true)?.let { it.substringAfterLast(':') }
             ?: ""
+        if (serviceName == "RenderingControl" || serviceName == "AVTransport") {
+            val level = if (action.equals("GetPositionInfo", true) || action.equals("GetTransportInfo", true)) Log.DEBUG else Log.INFO
+            Log.println(
+                level,
+                TAG,
+                "DLNA SOAP service=$serviceName action=$action bodyBytes=${body.toByteArray(StandardCharsets.UTF_8).size}",
+            )
+        }
         val response = try {
-            when (service to action) {
+            when (serviceName to action) {
                 "AVTransport" to "SetAVTransportURI" -> {
                     val uri = tag(body, "CurrentURI").orEmpty()
                     val metadata = tag(body, "CurrentURIMetaData").orEmpty()
                     val media = parseMedia(uri, metadata)
+                    callback.log("DLNA media ${media.type}: title=${media.title.ifBlank { "(untitled)" }}, duration=${formatTime(media.durationMs)}, lyrics=${media.lyrics.length} chars, lyricsUri=${media.lyricsUri.isNotBlank()}")
                     if (media.uri.isBlank() || !callback.onSetMedia(media)) return fault(output, 701, "Transition not available")
                     currentMedia = media
                     transportState = "STOPPED"
-                    soapResponse(service, "SetAVTransportURI")
+                    soapResponse(serviceName, "SetAVTransportURI")
                 }
                 "AVTransport" to "Play" -> {
                     if (currentMedia == null) return fault(output, 702, "No content")
-                    callback.onPlay(); transportState = "PLAYING"; soapResponse(service, "Play")
+                    Log.i(TAG, "DLNA Play uri=${currentMedia?.uri?.take(160)}")
+                    callback.onPlay(); transportState = "PLAYING"; soapResponse(serviceName, "Play")
                 }
-                "AVTransport" to "Pause" -> { callback.onPause(); transportState = "PAUSED_PLAYBACK"; soapResponse(service, "Pause") }
-                "AVTransport" to "Stop" -> { callback.onStop(); transportState = "STOPPED"; soapResponse(service, "Stop") }
+                "AVTransport" to "Pause" -> { callback.onPause(); transportState = "PAUSED_PLAYBACK"; soapResponse(serviceName, "Pause") }
+                "AVTransport" to "Stop" -> { callback.onStop(); transportState = "STOPPED"; soapResponse(serviceName, "Stop") }
                 "AVTransport" to "Seek" -> {
+                    val unit = tag(body, "Unit", caseInsensitive = true).orEmpty()
                     val target = tag(body, "Target") ?: "00:00:00"
-                    callback.onSeek(parseTime(target)); soapResponse(service, "Seek")
+                    val positionMs = parseTime(target)
+                    Log.i(TAG, "DLNA Seek unit=$unit target=$target positionMs=$positionMs")
+                    callback.onSeek(positionMs); soapResponse(serviceName, "Seek")
                 }
-                "AVTransport" to "GetTransportInfo" -> soapResponse(service, "GetTransportInfo", "<CurrentTransportState>$transportState</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>1</CurrentSpeed>")
+                "AVTransport" to "GetTransportInfo" -> {
+                    val snapshot = callback.snapshot()
+                    val state = snapshot.state.takeIf { it != "NO_MEDIA" }.orEmpty().ifBlank { transportState }
+                    Log.d(TAG, "DLNA GetTransportInfo state=$state")
+                    soapResponse(serviceName, "GetTransportInfo", "<CurrentTransportState>$state</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus><CurrentSpeed>${if (state == "PLAYING") 1 else 0}</CurrentSpeed>")
+                }
                 "AVTransport" to "GetPositionInfo" -> {
                     val s = callback.snapshot()
-                    soapResponse(service, "GetPositionInfo", "<Track>1</Track><TrackDuration>${formatTime(s.durationMs)}</TrackDuration><TrackMetaData></TrackMetaData><TrackURI>${xml(s.media?.uri.orEmpty())}</TrackURI><RelTime>${formatTime(s.positionMs)}</RelTime><AbsTime>NOT_IMPLEMENTED</AbsTime><RelCount>0</RelCount><AbsCount>0</AbsCount>")
+                    // The player snapshot is published on Android's main
+                    // thread. During the short handoff after SetAVTransportURI
+                    // it can still be one tick behind, while currentMedia is
+                    // already known to the SOAP thread. Use both so the
+                    // sender does not see a transient zero-length track.
+                    val media = s.media ?: currentMedia
+                    val durationMs = s.durationMs.takeIf { it > 0L }
+                        ?: media?.durationMs?.takeIf { it > 0L }
+                        ?: 0L
+                    val position = formatTime(s.positionMs.coerceIn(0L, durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE))
+                    val duration = formatTime(durationMs)
+                    Log.d(TAG, "DLNA GetPositionInfo state=${s.state} position=$position duration=$duration")
+                    soapResponse(serviceName, "GetPositionInfo", "<Track>1</Track><TrackDuration>$duration</TrackDuration><TrackMetaData></TrackMetaData><TrackURI>${xml(media?.uri.orEmpty())}</TrackURI><RelTime>$position</RelTime><AbsTime>$position</AbsTime><RelCount>0</RelCount><AbsCount>0</AbsCount>")
                 }
                 "AVTransport" to "GetMediaInfo" -> {
                     val s = callback.snapshot()
-                    soapResponse(service, "GetMediaInfo", "<NrTracks>1</NrTracks><MediaDuration>${formatTime(s.durationMs)}</MediaDuration><CurrentURI>${xml(s.media?.uri.orEmpty())}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData><NextURI></NextURI><NextURIMetaData></NextURIMetaData><PlayMedium>NETWORK</PlayMedium><RecordMedium>NOT_IMPLEMENTED</RecordMedium><WriteStatus>NOT_IMPLEMENTED</WriteStatus>")
+                    val media = s.media ?: currentMedia
+                    val durationMs = s.durationMs.takeIf { it > 0L }
+                        ?: media?.durationMs?.takeIf { it > 0L }
+                        ?: 0L
+                    soapResponse(serviceName, "GetMediaInfo", "<NrTracks>1</NrTracks><MediaDuration>${formatTime(durationMs)}</MediaDuration><CurrentURI>${xml(media?.uri.orEmpty())}</CurrentURI><CurrentURIMetaData></CurrentURIMetaData><NextURI></NextURI><NextURIMetaData></NextURIMetaData><PlayMedium>NETWORK</PlayMedium><RecordMedium>NOT_IMPLEMENTED</RecordMedium><WriteStatus>NOT_IMPLEMENTED</WriteStatus>")
                 }
-                "AVTransport" to "GetDeviceCapabilities" -> soapResponse(service, "GetDeviceCapabilities", "<PlayMedia>NETWORK,UNKNOWN</PlayMedia><RecMedia>NOT_IMPLEMENTED</RecMedia><RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>")
-                "AVTransport" to "GetTransportSettings" -> soapResponse(service, "GetTransportSettings", "<PlayMode>NORMAL</PlayMode><RecQualityMode>NOT_IMPLEMENTED</RecQualityMode>")
-                "AVTransport" to "GetCurrentTransportActions" -> soapResponse(service, "GetCurrentTransportActions", "<Actions>Play,Pause,Stop,Seek</Actions>")
-                "RenderingControl" to "GetVolume" -> soapResponse(service, "GetVolume", "<CurrentVolume>$volume</CurrentVolume>")
+                "AVTransport" to "GetDeviceCapabilities" -> soapResponse(serviceName, "GetDeviceCapabilities", "<PlayMedia>NETWORK,UNKNOWN</PlayMedia><RecMedia>NOT_IMPLEMENTED</RecMedia><RecQualityModes>NOT_IMPLEMENTED</RecQualityModes>")
+                "AVTransport" to "GetTransportSettings" -> soapResponse(serviceName, "GetTransportSettings", "<PlayMode>NORMAL</PlayMode><RecQualityMode>NOT_IMPLEMENTED</RecQualityMode>")
+                "AVTransport" to "GetCurrentTransportActions" -> soapResponse(serviceName, "GetCurrentTransportActions", "<Actions>Play,Pause,Stop,Seek</Actions>")
+                "RenderingControl" to "GetVolume" -> {
+                    Log.i(TAG, "DLNA GetVolume -> $volume")
+                    soapResponse(serviceName, "GetVolume", "<CurrentVolume>$volume</CurrentVolume>")
+                }
                 "RenderingControl" to "SetVolume" -> {
-                    val value = tag(body, "DesiredVolume")?.toIntOrNull()?.coerceIn(0, 100) ?: volume
-                    volume = value; callback.onSetVolume(value); soapResponse(service, "SetVolume")
+                    val raw = tag(body, "DesiredVolume", caseInsensitive = true)
+                    val value = raw?.toIntOrNull()?.coerceIn(0, 100) ?: volume
+                    Log.i(TAG, "DLNA SetVolume desired=$raw applied=$value previous=$volume")
+                    volume = value
+                    callback.onSetVolume(value)
+                    soapResponse(serviceName, "SetVolume")
                 }
-                "RenderingControl" to "GetMute" -> soapResponse(service, "GetMute", "<CurrentMute>${if (muted) 1 else 0}</CurrentMute>")
+                "RenderingControl" to "GetVolumeDB" -> {
+                    val db = if (volume == 0) -3000 else -3000 + volume * 30
+                    soapResponse(serviceName, "GetVolumeDB", "<CurrentVolumeDB>$db</CurrentVolumeDB>")
+                }
+                "RenderingControl" to "SetVolumeDB" -> {
+                    val raw = tag(body, "DesiredVolume", caseInsensitive = true) ?: tag(body, "DesiredVolumeDB", caseInsensitive = true)
+                    val db = raw?.toIntOrNull()
+                    val value = db?.let { ((it + 3000) / 30).coerceIn(0, 100) } ?: volume
+                    Log.i(TAG, "DLNA SetVolumeDB desired=$raw applied=$value previous=$volume")
+                    volume = value
+                    callback.onSetVolume(value)
+                    soapResponse(serviceName, "SetVolumeDB")
+                }
+                "RenderingControl" to "GetMute" -> soapResponse(serviceName, "GetMute", "<CurrentMute>${if (muted) 1 else 0}</CurrentMute>")
                 "RenderingControl" to "SetMute" -> {
-                    muted = tag(body, "DesiredMute") == "1"; callback.onSetMute(muted); soapResponse(service, "SetMute")
+                    muted = tag(body, "DesiredMute", caseInsensitive = true) == "1"
+                    Log.i(TAG, "DLNA SetMute applied=$muted")
+                    callback.onSetMute(muted)
+                    soapResponse(serviceName, "SetMute")
                 }
-                "ConnectionManager" to "GetProtocolInfo" -> soapResponse(service, "GetProtocolInfo", "<Source></Source><Sink>http-get:*:video/mp4:*,http-get:*:video/*:*,http-get:*:audio/*:*,http-get:*:image/*:*</Sink>")
-                "ConnectionManager" to "GetCurrentConnectionIDs" -> soapResponse(service, "GetCurrentConnectionIDs", "<ConnectionIDs>0</ConnectionIDs>")
-                "ConnectionManager" to "GetCurrentConnectionInfo" -> soapResponse(service, "GetCurrentConnectionInfo", "<RcsID>0</RcsID><AVTransportID>0</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Input</Direction><Status>OK</Status>")
-                else -> return fault(output, 401, "Invalid Action")
+                "ConnectionManager" to "GetProtocolInfo" -> soapResponse(serviceName, "GetProtocolInfo", "<Source></Source><Sink>http-get:*:video/mp4:*,http-get:*:video/*:*,http-get:*:audio/*:*,http-get:*:image/*:*</Sink>")
+                "ConnectionManager" to "GetCurrentConnectionIDs" -> soapResponse(serviceName, "GetCurrentConnectionIDs", "<ConnectionIDs>0</ConnectionIDs>")
+                "ConnectionManager" to "GetCurrentConnectionInfo" -> soapResponse(serviceName, "GetCurrentConnectionInfo", "<RcsID>0</RcsID><AVTransportID>0</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Input</Direction><Status>OK</Status>")
+                else -> {
+                    return fault(output, 401, "Invalid Action")
+                }
             }
         } catch (_: HandledSoapException) {
             return
@@ -304,9 +379,15 @@ class DlnaReceiver(
     }
 
     private fun handleSubscribe(output: BufferedOutputStream, service: String, headers: Map<String, String>) {
+        val normalizedService = service.substringBefore('.').replaceFirstChar { it.uppercase() }
         val sid = headers["sid"]?.takeIf { it.startsWith("uuid:") } ?: "uuid:${UUID.randomUUID()}"
         val callbackUrl = headers["callback"]?.let { Regex("<([^>]+)>").find(it)?.groupValues?.get(1) }
-        if (callbackUrl != null) subscriptions[sid] = Subscription(sid, service, callbackUrl)
+        if (callbackUrl != null) {
+            subscriptions[sid] = Subscription(sid, normalizedService, callbackUrl)
+            Log.i(TAG, "DLNA SUBSCRIBE service=$normalizedService sid=$sid callback=$callbackUrl")
+        } else {
+            Log.i(TAG, "DLNA SUBSCRIBE renewal service=$normalizedService sid=$sid")
+        }
         val extra = "SID: $sid\r\nTIMEOUT: Second-1800\r\n"
         respond(output, "200 OK", "text/plain", "", extra)
         if (callbackUrl != null) scheduleEventDispatch()
@@ -338,12 +419,41 @@ class DlnaReceiver(
         try {
             val url = java.net.URL(subscription.callback)
             val snapshot = callback.snapshot()
-            val event = when (subscription.service) {
-                "AVTransport" -> "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/AVT/\"><InstanceID val=\"0\"><TransportState val=\"${transportState}\"/><CurrentTrackURI val=\"${xml(snapshot.media?.uri.orEmpty())}\"/><RelativeTimePosition val=\"${formatTime(snapshot.positionMs)}\"/></InstanceID></Event>"
-                "RenderingControl" -> "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/RCS/\"><InstanceID val=\"0\"><Volume channel=\"Master\" val=\"$volume\"/><Mute channel=\"Master\" val=\"${if (muted) 1 else 0}\"/></InstanceID></Event>"
-                else -> "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/CM/\"><ConnectionManagerState val=\"OK\"/></Event>"
+            val media = snapshot.media ?: currentMedia
+            val durationMs = snapshot.durationMs.takeIf { it > 0L }
+                ?: media?.durationMs?.takeIf { it > 0L }
+                ?: 0L
+            val positionMs = snapshot.positionMs.coerceIn(
+                0L,
+                durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE,
+            )
+            val lastChange = when (subscription.service) {
+                "AVTransport" -> """
+                    <Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/">
+                      <InstanceID val="0">
+                        <TransportState val="${xml(snapshot.state.takeIf { it != "NO_MEDIA" }.orEmpty().ifBlank { transportState })}"/>
+                        <TransportStatus val="OK"/>
+                        <CurrentTrackURI val="${xml(media?.uri.orEmpty())}"/>
+                        <CurrentTrackDuration val="${formatTime(durationMs)}"/>
+                        <RelativeTimePosition val="${formatTime(positionMs)}"/>
+                        <AbsoluteTimePosition val="${formatTime(positionMs)}"/>
+                      </InstanceID>
+                    </Event>
+                """.trimIndent()
+                "RenderingControl" -> """
+                    <Event xmlns="urn:schemas-upnp-org:metadata-1-0/RCS/">
+                      <InstanceID val="0">
+                        <Volume channel="Master" val="$volume"/>
+                        <Mute channel="Master" val="${if (muted) 1 else 0}"/>
+                      </InstanceID>
+                    </Event>
+                """.trimIndent()
+                else -> "<Event xmlns=\"urn:schemas-upnp-org:metadata-1-0/CM/\"><InstanceID val=\"0\"><ConnectionManagerState val=\"OK\"/></InstanceID></Event>"
             }
+            val event = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
+                "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\"><e:property><LastChange xmlns=\"urn:schemas-upnp-org:metadata-1-0/${if (subscription.service == "AVTransport") "AVT" else if (subscription.service == "RenderingControl") "RCS" else "CM"}/\">$lastChange</LastChange></e:property></e:propertyset>"
             val bytes = event.toByteArray(StandardCharsets.UTF_8)
+            Log.d(TAG, "DLNA event service=${subscription.service} sid=${subscription.sid} position=${formatTime(positionMs)} duration=${formatTime(durationMs)}")
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(url.host, if (url.port > 0) url.port else 80), 3000)
                 val out = socket.getOutputStream()
@@ -352,6 +462,7 @@ class DlnaReceiver(
             }
         } catch (e: Exception) {
             Log.d(TAG, "DLNA event failed", e)
+            subscriptions.remove(subscription.sid)
         }
     }
 
@@ -363,12 +474,41 @@ class DlnaReceiver(
         val artist = tag(metadata, "artist", caseInsensitive = true).orEmpty()
         val album = tag(metadata, "album", caseInsensitive = true).orEmpty()
         val art = tag(metadata, "albumArtURI", caseInsensitive = true).orEmpty()
+        val lyricsUri = listOf(
+            "lyricsURI", "lyricsUri", "lyricsURL", "lyricsUrl",
+            "lyricURI", "lyricUri", "lyricURL", "lyricUrl",
+            "lrcURI", "lrcUri", "lrcURL", "lrcUrl",
+        )
+            .asSequence().mapNotNull { tag(metadata, it, caseInsensitive = true) }.firstOrNull().orEmpty()
+        val lyrics = listOf("lyrics", "lyric", "unsyncedLyrics", "syncLyrics", "lrc", "lyricText")
+            .asSequence().mapNotNull { tag(metadata, it, caseInsensitive = true) }.firstOrNull().orEmpty()
+        // Most DLNA senders put the VOD duration on the DIDL-Lite <res>
+        // element. ExoPlayer may not know it yet when the controller first
+        // calls GetPositionInfo, so retain this value as an early fallback.
+        val durationMs = listOfNotNull(
+            attribute(metadata, "res", "duration"),
+            tag(metadata, "duration", caseInsensitive = true),
+        ).asSequence()
+            .map(::parseTime)
+            .firstOrNull { it > 0L }
+            ?: 0L
         val type = when {
             mime.startsWith("image/", true) || cleanUri.substringBefore('?').substringAfterLast('.').lowercase() in IMAGE_EXTENSIONS -> DlnaMediaType.IMAGE
             mime.startsWith("audio/", true) || cleanUri.substringBefore('?').substringAfterLast('.').lowercase() in AUDIO_EXTENSIONS -> DlnaMediaType.AUDIO
             else -> DlnaMediaType.VIDEO
         }
-        return DlnaMedia(cleanUri, type, mime, title, artist, album, decodeXml(art))
+        return DlnaMedia(
+            uri = cleanUri,
+            type = type,
+            mimeType = mime,
+            title = title,
+            artist = artist,
+            album = album,
+            artUri = decodeXml(art),
+            lyricsUri = resolveUri(cleanUri, decodeXml(lyricsUri)),
+            lyrics = lyrics,
+            durationMs = durationMs,
+        )
     }
 
     private fun deviceDescription(): String = """
@@ -408,9 +548,11 @@ class DlnaReceiver(
     private fun scpdRenderingControl() = scpdHeader() + listOf(
         action("GetVolume", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("CurrentVolume", "out", "Volume")),
         action("SetVolume", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("DesiredVolume", "in", "Volume")),
+        action("GetVolumeDB", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("CurrentVolumeDB", "out", "VolumeDB")),
+        action("SetVolumeDB", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("DesiredVolumeDB", "in", "VolumeDB")),
         action("GetMute", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("CurrentMute", "out", "Mute")),
         action("SetMute", arg("InstanceID", "in", "A_ARG_TYPE_InstanceID") + arg("Channel", "in", "A_ARG_TYPE_Channel") + arg("DesiredMute", "in", "Mute")),
-    ).joinToString("") + scpdStateTable("Volume", "ui2", "Mute", "boolean")
+    ).joinToString("") + scpdStateTable("Volume", "ui2", "VolumeDB", "i4", "Mute", "boolean")
 
     private fun scpdConnectionManager() = scpdHeader() + listOf(
         action("GetProtocolInfo", arg("Source", "out", "SourceProtocolInfo") + arg("Sink", "out", "SinkProtocolInfo")),
@@ -484,22 +626,56 @@ class DlnaReceiver(
         return if (read == count) result else result.copyOf(read)
     }
 
+    private fun readChunkedBytes(input: InputStream): ByteArray {
+        val output = ByteArrayOutputStream()
+        while (true) {
+            val line = readLine(input) ?: break
+            val size = line.substringBefore(';').trim().toIntOrNull(16)
+                ?: throw IllegalArgumentException("invalid chunk size")
+            if (size == 0) {
+                while (readLine(input)?.isNotEmpty() == true) Unit
+                break
+            }
+            if (output.size() + size > MAX_BODY_BYTES) throw IllegalArgumentException("request body too large")
+            output.write(readBytes(input, size))
+            // Consume the CRLF following the chunk payload.
+            readLine(input)
+        }
+        return output.toByteArray()
+    }
+
     private fun parseHeaders(text: String): Map<String, String> = text.lineSequence()
         .mapNotNull { line -> line.indexOf(':').takeIf { it > 0 }?.let { line.substring(0, it).trim().lowercase() to line.substring(it + 1).trim() } }
         .toMap()
 
     private fun tag(xml: String, name: String, caseInsensitive: Boolean = false): String? {
         val flag = if (caseInsensitive) setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL) else setOf(RegexOption.DOT_MATCHES_ALL)
-        return Regex("<(?:[A-Za-z0-9_]+:)?$name(?:\\s[^>]*)?>(.*?)</(?:[A-Za-z0-9_]+:)?$name>", flag).find(xml)?.groupValues?.get(1)?.trim()
+        return Regex("<(?:[A-Za-z0-9_.-]+:)?$name(?:\\s[^>]*)?>(.*?)</(?:[A-Za-z0-9_.-]+:)?$name>", flag).find(xml)?.groupValues?.get(1)?.trim()
             ?.let(::decodeXml)
     }
+
+    private fun attribute(xml: String, element: String, name: String): String? =
+        Regex(
+            "<(?:[A-Za-z0-9_.-]+:)?$element\\b[^>]*\\b$name\\s*=\\s*[\\\"']([^\\\"']*)[\\\"']",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+        ).find(xml)?.groupValues?.getOrNull(1)?.trim()?.let(::decodeXml)
 
     private fun decodeXml(value: String): String = value.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
     private fun xml(value: String): String = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
 
+    private fun resolveUri(base: String, value: String): String {
+        if (value.isBlank()) return ""
+        return runCatching { URL(URL(base), value).toString() }.getOrDefault(value)
+    }
+
     private fun parseTime(value: String): Long = runCatching {
         val parts = value.trim().split(':')
-        if (parts.size != 3) 0L else ((parts[0].toLong() * 3600 + parts[1].toLong() * 60) * 1000 + parts[2].toDouble().toLong() * 1000)
+        if (parts.size != 3) 0L else {
+            val hours = parts[0].toLong()
+            val minutes = parts[1].toLong()
+            val seconds = parts[2].toDouble()
+            ((hours * 3600 + minutes * 60) * 1000 + (seconds * 1000).toLong()).coerceAtLeast(0L)
+        }
     }.getOrDefault(0L)
 
     private fun formatTime(ms: Long): String {

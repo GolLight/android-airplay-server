@@ -150,6 +150,17 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeStart(
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeDisconnectClients(
+        JNIEnv *env, jobject thiz, jlong handle) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx || !ctx->raop) return;
+    // Let the protocol thread close existing sessions; keep discovery/listening alive.
+    raop_remove_known_connections(ctx->raop);
+    LOGI("AirPlay client disconnect requested for DLNA takeover");
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeStop(
         JNIEnv *env, jobject thiz, jlong handle) {
 

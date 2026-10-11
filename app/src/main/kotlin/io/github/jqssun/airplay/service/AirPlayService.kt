@@ -40,6 +40,9 @@ import io.github.jqssun.airplay.realDisplaySize
 import io.github.jqssun.airplay.audio.DacpController
 import io.github.jqssun.airplay.audio.DacpPlayer
 import io.github.jqssun.airplay.audio.DmapParser
+import io.github.jqssun.airplay.audio.AirPlayLyricHistory
+import io.github.jqssun.airplay.audio.AirPlayMetadataPipeline
+import io.github.jqssun.airplay.audio.AirPlayMetadataUpdate
 import io.github.jqssun.airplay.audio.TrackInfo
 import io.github.jqssun.airplay.audio.VolumeBroadcast
 import io.github.jqssun.airplay.bridge.LogListener
@@ -138,6 +141,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private val _dlnaImage = MutableStateFlow<Bitmap?>(null)
     val dlnaImage = _dlnaImage.asStateFlow()
+    private val _dlnaVideoPreview = MutableStateFlow<Bitmap?>(null)
+    val dlnaVideoPreview = _dlnaVideoPreview.asStateFlow()
+
+    private val _dlnaVolume = MutableStateFlow(100)
+    val dlnaVolume = _dlnaVolume.asStateFlow()
+
+    private val _dlnaMuted = MutableStateFlow(false)
+    val dlnaMuted = _dlnaMuted.asStateFlow()
 
     // recent /playback-info polls with no playback = pending video; polls start ~1s before /play
     @Volatile private var _lastVideoPollAt = 0L
@@ -154,6 +165,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private val _trackInfo = MutableStateFlow(TrackInfo())
     val trackInfo = _trackInfo.asStateFlow()
+    private val airPlayMetadataPipeline = AirPlayMetadataPipeline()
+    private var airPlayTrackIdentity = TrackInfo()
+    private val airPlayLyricHistory = AirPlayLyricHistory()
+
+    private fun clearAirPlayLyricState() {
+        airPlayTrackIdentity = TrackInfo()
+        airPlayLyricHistory.clear()
+    }
 
     private val _positionMs = MutableStateFlow(0L)
     val positionMs = _positionMs.asStateFlow()
@@ -170,7 +189,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     fun currentPositionMs(): Long {
         if (_progressBaseTime == 0L || !_playing.value) return _positionMs.value
         val elapsed = SystemClock.elapsedRealtime() - _progressBaseTime
-        return (_progressBaseMs + elapsed).coerceIn(0, _durationMs.value)
+        val position = (_progressBaseMs + elapsed).coerceAtLeast(0L)
+        return if (_durationMs.value > 0L) position.coerceAtMost(_durationMs.value) else position
     }
 
     var dacpController: DacpController? = null
@@ -230,7 +250,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             }
 
             override fun onFirstVideoFrame() {
-                launchPendingMainActivity()
+                val snapshot = dlnaPlayer.snapshot()
+                if (_dlnaActive.value && snapshot.state == "PLAYING") launchPendingMainActivity()
             }
 
             override fun onVideoSize(width: Int, height: Int) {
@@ -242,13 +263,19 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
             override fun onImageReady(bitmap: Bitmap) {
                 _dlnaImage.value = bitmap
-                launchPendingMainActivity()
             }
 
             override fun onArtworkReady(bitmap: Bitmap) {
                 if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.AUDIO) {
                     _trackInfo.value = _trackInfo.value.copy(coverArt = bitmap)
                     _updateMediaMetadata()
+                }
+            }
+
+            override fun onLyricsReady(text: String) {
+                if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.AUDIO) {
+                    Log.i(TAG, "DLNA lyrics ready chars=${text.length} uri=${dlnaPlayer.snapshot().media?.lyricsUri.orEmpty().isNotBlank()}")
+                    _trackInfo.value = _trackInfo.value.copy(lyrics = text)
                 }
             }
 
@@ -279,6 +306,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             setPlaying = ::_setPlaying,
         )
         mediaSession = MediaSessionCompat(this, "AirPlay").apply {
+            // Explicitly initialize the local stream so Android TV exposes a real
+            // media-session volume range to remote controllers.
+            setPlaybackToLocal(AudioManager.STREAM_MUSIC)
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() {
                     if (_dlnaActive.value) {
@@ -313,14 +343,14 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 }
                 override fun onFastForward() {
                     if (_dlnaActive.value) {
-                        dlnaPlayer.seek(dlnaPlayer.snapshot().positionMs + VIDEO_SEEK_STEP_MS)
+                        dlnaPlayer.seekBy(VIDEO_SEEK_STEP_MS)
                         return
                     }
                     if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(VIDEO_SEEK_STEP_MS)
                 }
                 override fun onRewind() {
                     if (_dlnaActive.value) {
-                        dlnaPlayer.seek(dlnaPlayer.snapshot().positionMs - VIDEO_SEEK_STEP_MS)
+                        dlnaPlayer.seekBy(-VIDEO_SEEK_STEP_MS)
                         return
                     }
                     if (_videoPlaybackActive.value) airPlayVideoPlayer.seekBy(-VIDEO_SEEK_STEP_MS)
@@ -388,7 +418,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             if (nativeHandle != 0L) {
                 NativeBridge.nativeUpdatePlaybackInfo(nativeHandle, snapshot.position, snapshot.duration, snapshot.rate, snapshot.ready)
             }
-            if (_videoPlaybackActive.value) {
+            if (_videoPlaybackActive.value && !_dlnaActive.value) {
                 _updateVideoPlaybackState(snapshot.position, snapshot.rate)
                 _videoPlaybackInfo.value = VideoPlaybackInfo(
                     positionMs = (snapshot.position * 1000).toLong(),
@@ -410,7 +440,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_START_SERVER) {
             promoteToForeground()
-            val name = prefs.getString(Prefs.SERVER_NAME, Prefs.DEF_SERVER_NAME) ?: Prefs.DEF_SERVER_NAME
+            val name = Prefs.defaultServerName(prefs)
             startServer(name, ensureServiceStarted = false)
             if (_serverState.value != ServerState.RUNNING) stopSelf(startId)
         }
@@ -423,7 +453,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private fun startServer(name: String, ensureServiceStarted: Boolean) {
         if (_serverState.value == ServerState.RUNNING) return
-        val effectiveName = name.ifBlank { Prefs.DEF_SERVER_NAME }
+        val effectiveName = name.ifBlank { Prefs.defaultServerName(prefs) }
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "airplay:server").apply { acquire() }
@@ -549,23 +579,29 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             uuid = DlnaSettings.stableUuid(this),
             callback = object : DlnaReceiver.Callback {
                 override fun onSetMedia(media: DlnaMedia): Boolean {
-                    if (hasAirPlaySession()) {
-                        log("DLNA request rejected while AirPlay is active")
-                        return false
+                    _mainHandler.post {
+                        if (hasAirPlaySession()) {
+                            _stopAirPlayPlayback("AirPlay replaced by DLNA")
+                        }
+                        pendingMainActivityLaunch = false
+                        _prepareDlnaMedia(media)
                     }
-                    _mainHandler.post { _prepareDlnaMedia(media) }
                     return true
                 }
 
                 override fun onPlay() {
                     _mainHandler.post {
-                        dlnaPlayer.resume()
                         pendingMainActivityLaunch = true
+                        dlnaPlayer.resume()
+                        Log.i(TAG, "DLNA play received; pending UI launch=${!MainActivity.isVisible()}")
                     }
                 }
 
                 override fun onPause() {
-                    _mainHandler.post { dlnaPlayer.pause() }
+                    _mainHandler.post {
+                        pendingMainActivityLaunch = false
+                        dlnaPlayer.pause()
+                    }
                 }
 
                 override fun onStop() {
@@ -577,6 +613,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 }
 
                 override fun onSetVolume(percent: Int) {
+                    Log.i(TAG, "DLNA volume callback: $percent%")
                     _mainHandler.post { dlnaPlayer.setVolume(percent) }
                 }
 
@@ -595,7 +632,6 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         _connectionCount.value > 0 || _mirroringActive.value || (_audioOnly.value && !_dlnaActive.value)
 
     private fun _prepareDlnaMedia(media: DlnaMedia) {
-        if (hasAirPlaySession()) return
         val previous = dlnaPlayer.snapshot().media
         if (previous?.uri != media.uri) {
             _videoPlaySeq.value++
@@ -606,6 +642,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         }
         _dlnaActive.value = true
         _dlnaImage.value = null
+        _dlnaVideoPreview.value = null
         when (media.type) {
             DlnaMediaType.VIDEO -> {
                 _videoPlaybackActive.value = true
@@ -615,7 +652,12 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             DlnaMediaType.AUDIO -> {
                 _videoPlaybackActive.value = false
                 _audioOnly.value = true
-                _trackInfo.value = TrackInfo(title = media.title, artist = media.artist, album = media.album)
+                _trackInfo.value = TrackInfo(
+                    title = media.title,
+                    artist = media.artist,
+                    album = media.album,
+                    lyrics = media.lyrics,
+                )
                 _positionMs.value = 0L
                 _durationMs.value = 0L
                 mediaSession?.isActive = true
@@ -633,15 +675,21 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     private fun _onDlnaSnapshot(snapshot: DlnaPlayerSnapshot) {
         val media = snapshot.media
         dlnaReceiver?.updateSnapshot(snapshot)
+        _dlnaVolume.value = snapshot.volume
+        _dlnaMuted.value = snapshot.muted
         if (media == null) {
+            // A queued DLNA stop may finish after AirPlay has taken ownership.
+            if (!_dlnaActive.value) return
             _dlnaActive.value = false
             _dlnaImage.value = null
+            _dlnaVideoPreview.value = null
             _videoPlaybackActive.value = false
             if (_audioOnly.value) _setAudioOnly(false)
             _updateMediaNotification()
             return
         }
         _dlnaActive.value = true
+        _dlnaVideoPreview.value = snapshot.videoPreview
         when (media.type) {
             DlnaMediaType.VIDEO -> {
                 _videoPlaybackActive.value = true
@@ -654,13 +702,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                     playing = snapshot.state == "PLAYING",
                     buffering = snapshot.state == "TRANSITIONING",
                 )
+                if (snapshot.videoReady && snapshot.state == "PLAYING") launchPendingMainActivity()
             }
             DlnaMediaType.AUDIO -> {
                 _videoPlaybackActive.value = false
                 _audioOnly.value = true
-                if (snapshot.state == "PLAYING" || snapshot.state == "PAUSED_PLAYBACK") {
-                    launchPendingMainActivity()
-                }
                 _trackInfo.value = _trackInfo.value.copy(
                     title = media.title,
                     artist = media.artist,
@@ -686,28 +732,63 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                 }
             }
         }
+        if (media.type == DlnaMediaType.AUDIO && snapshot.state == "PLAYING") {
+            launchPendingMainActivity()
+        }
         _refreshDacpPlayer()
         _updateMediaNotification()
     }
 
     private fun _stopDlnaPlayback(message: String, returnToBackground: Boolean) {
         if (!_dlnaActive.value && dlnaPlayer.snapshot().media == null) return
+        pendingMainActivityLaunch = false
         dlnaPlayer.stop()
         _dlnaActive.value = false
         _dlnaImage.value = null
+        _dlnaVideoPreview.value = null
         _videoPlaybackActive.value = false
         _audioOnly.value = false
         _trackInfo.value = TrackInfo()
+        _dlnaVolume.value = 100
+        _dlnaMuted.value = false
         _positionMs.value = 0L
         _durationMs.value = 0L
         mediaSession?.isActive = false
         if (returnToBackground) {
             _mainHandler.post {
-                if (_connectionCount.value == 0) MainActivity.requestReturnToBackground()
+                if (_connectionCount.value == 0 && !_dlnaActive.value) MainActivity.requestReturnToBackground()
             }
         }
         log(message)
         _updateMediaNotification()
+    }
+
+    private fun _stopAirPlayPlayback(message: String) {
+        clearAirPlayLyricState()
+        if (nativeHandle != 0L) NativeBridge.nativeDisconnectClients(nativeHandle)
+        pendingMainActivityLaunch = false
+        _videoPollSuppressed = true
+        if (_videoPlaybackActive.value) {
+            airPlayVideoPlayer.stop()
+            _videoPlaybackActive.value = false
+        }
+        if (_mirroringActive.value) {
+            videoRenderer.stopSession()
+            _mirroringActive.value = false
+        }
+        if (_audioOnly.value) {
+            audioRenderer.stop()
+            _audioOnly.value = false
+        }
+        mediaSession?.isActive = false
+        _videoPlaybackInfo.value = VideoPlaybackInfo()
+        _positionMs.value = 0L
+        _durationMs.value = 0L
+        _trackInfo.value = TrackInfo()
+        _coverArtBytes = null
+        _refreshDacpPlayer()
+        _updateMediaNotification()
+        log(message)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -744,6 +825,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
         dlnaPlayer.stop()
         _dlnaActive.value = false
         _dlnaImage.value = null
+        _dlnaVideoPreview.value = null
         audioRenderer.detachEngine()
         if (nativeHandle != 0L) {
             NativeBridge.nativeStop(nativeHandle)
@@ -786,7 +868,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun setVideoPlaybackSurface(surface: Surface) {
-        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
+        if (_dlnaActive.value || dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
             dlnaPlayer.setSurface(surface)
         } else {
             airPlayVideoPlayer.setSurface(surface)
@@ -794,11 +876,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     fun clearVideoPlaybackSurface(surface: Surface) {
-        if (_dlnaActive.value && dlnaPlayer.snapshot().media?.type == DlnaMediaType.VIDEO) {
-            dlnaPlayer.clearSurface(surface)
-        } else {
-            airPlayVideoPlayer.clearSurface(surface)
-        }
+        // Surface destruction can be delivered after the session state has
+        // already been cleared. Clear both consumers so a released
+        // SurfaceView is never retained by a later DLNA prepare.
+        dlnaPlayer.clearSurface(surface)
+        airPlayVideoPlayer.clearSurface(surface)
     }
 
     fun setVideoPlaying(playing: Boolean) {
@@ -849,13 +931,16 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     fun playDlna() = dlnaPlayer.resume()
     fun pauseDlna() = dlnaPlayer.pause()
     fun seekDlna(positionMs: Long) = dlnaPlayer.seek(positionMs)
+    fun seekDlnaBy(deltaMs: Long) = dlnaPlayer.seekBy(deltaMs)
     fun stopDlna() = _stopDlnaPlayback("DLNA playback stopped (local)", returnToBackground = true)
     fun dlnaVolumeUp() {
         val s = dlnaPlayer.snapshot()
+        Log.i(TAG, "DLNA local volume up ${s.volume} -> ${(s.volume + 5).coerceAtMost(100)}")
         dlnaPlayer.setVolume(s.volume + 5)
     }
     fun dlnaVolumeDown() {
         val s = dlnaPlayer.snapshot()
+        Log.i(TAG, "DLNA local volume down ${s.volume} -> ${(s.volume - 5).coerceAtLeast(0)}")
         dlnaPlayer.setVolume(s.volume - 5)
     }
     fun dlnaMuteToggle() {
@@ -867,7 +952,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun _endVideoPlayback(message: String) {
-        if (!_videoPlaybackActive.value) return
+        if (_dlnaActive.value || !_videoPlaybackActive.value) return
         // lingering polls after a stop must not bounce the UI back to a pending session
         _videoPollSuppressed = true
         _videoPlaybackActive.value = false
@@ -898,7 +983,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     // RaopCallbackHandler (called from native threads)
 
     override fun onVideoData(data: ByteArray, ntpTimeNs: Long, isH265: Boolean) {
-        videoRenderer.feedFrame(data, ntpTimeNs, isH265)
+        if (!_dlnaActive.value) videoRenderer.feedFrame(data, ntpTimeNs, isH265)
     }
 
     override fun onVideoSessionPoll() {
@@ -948,6 +1033,11 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onVideoSize(srcW: Float, srcH: Float, w: Float, h: Float) {
         clearPin()
+        // Screen mirroring does not emit onVideoPlay. Treat the first video
+        // size as an AirPlay session taking the same-priority slot from DLNA.
+        if (_dlnaActive.value) {
+            _stopDlnaPlayback("DLNA replaced by AirPlay mirror", returnToBackground = false)
+        }
         if (w > 0 && h > 0) {
             _videoAspect.value = w / h
             _videoResolution.value = "${w.toInt()}x${h.toInt()}"
@@ -958,6 +1048,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onVolumeChange(volume: Float) {
+        if (_dlnaActive.value) return
         val frac = if (volume <= -144f) 0f else ((volume + 30f) / 30f).coerceIn(0f, 1f)
         _senderFrac = frac
         Log.d(TAG, "volume ${volume}dB, frac $frac")
@@ -1015,6 +1106,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onConnectionInit() {
         val firstConnection = _connectionCount.value == 0
+        if (firstConnection) clearAirPlayLyricState()
         _connectionCount.value++
         log("Client connected (${_connectionCount.value})")
         if (!firstConnection) return
@@ -1027,10 +1119,10 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     override fun onConnectionDestroy() {
         _connectionCount.value = (_connectionCount.value - 1).coerceAtLeast(0)
-        if (_connectionCount.value == 0) {
+        if (_connectionCount.value == 0 && !_dlnaActive.value) {
             pendingMainActivityLaunch = false
             _mainHandler.post {
-                if (_connectionCount.value == 0) MainActivity.requestReturnToBackground()
+                if (_connectionCount.value == 0 && !_dlnaActive.value) MainActivity.requestReturnToBackground()
             }
             // clients may drop without POST /stop; must run before the poll-state reset
             _endVideoPlayback("AirPlay Video stopped (disconnect)")
@@ -1041,6 +1133,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
             _videoPollSuppressed = false
             _coverArtBytes = null
             _trackInfo.value = TrackInfo()
+            _dlnaVolume.value = 100
+            _dlnaMuted.value = false
             _positionMs.value = 0
             _durationMs.value = 0
             dacpController?.reset()
@@ -1072,16 +1166,61 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onMetadata(data: ByteArray) {
+        if (_dlnaActive.value) return
         val map = DmapParser.parse(data)
-        val info = TrackInfo.fromDmap(map, _trackInfo.value.coverArt)
+        val previous = _trackInfo.value
+        val parsed = TrackInfo.fromDmap(map, previous.coverArt)
+        // Empty/progress-only packets do not replace the current song identity.
+        if (parsed.title.isBlank() && parsed.artist.isBlank()) return
+        val base = airPlayTrackIdentity
+        val update = airPlayMetadataPipeline.adapt(parsed, base) ?: return
+        val info = when (update) {
+            is AirPlayMetadataUpdate.LiveLyric -> {
+                val identity = update.track
+                val sameTrack = identity.title == base.title && identity.artist == base.artist
+                if (!sameTrack) airPlayLyricHistory.clear()
+                val normalized = identity.copy(
+                    album = identity.album.ifBlank { if (sameTrack) base.album else "" },
+                    durationMs = identity.durationMs.takeIf { it > 0L }
+                        ?: if (sameTrack) base.durationMs else 0L,
+                )
+                airPlayTrackIdentity = normalized
+                normalized.copy(
+                    coverArt = previous.coverArt,
+                    lyrics = airPlayLyricHistory.add(currentPositionMs(), update.text),
+                    liveLyrics = true,
+                )
+            }
+            is AirPlayMetadataUpdate.Track -> {
+                val track = update.info
+                // Some packets omit album/duration. That does not mean the
+                // track changed, and must not clear the live lyric history.
+                val sameTrack = track.title == base.title && track.artist == base.artist
+                if (!sameTrack) airPlayLyricHistory.clear()
+                track.copy(
+                    album = track.album.ifBlank { if (sameTrack) base.album else "" },
+                    lyrics = track.lyrics.ifBlank { if (sameTrack) previous.lyrics else "" },
+                    liveLyrics = sameTrack && track.lyrics.isBlank() && previous.liveLyrics,
+                    durationMs = track.durationMs.takeIf { it > 0L }
+                        ?: if (sameTrack) base.durationMs else 0L,
+                ).also { airPlayTrackIdentity = it }
+            }
+        }
         _trackInfo.value = info
         if (info.durationMs > 0) _durationMs.value = info.durationMs
-        _updateMediaMetadata()
-        _refreshDacpPlayer()
-        log("Track: ${info.artist} - ${info.title}")
+        // Live lyric packets should reach the UI immediately without rebuilding
+        // the notification and Media3 playlist for every line or duplicate.
+        if (info.title != previous.title || info.artist != previous.artist ||
+            info.album != previous.album || info.durationMs != previous.durationMs) {
+            _updateMediaMetadata()
+            _refreshDacpPlayer()
+            _updateMediaNotification()
+            log("Track: ${info.artist} - ${info.title}")
+        }
     }
 
     override fun onCoverArt(data: ByteArray) {
+        if (_dlnaActive.value) return
         val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return
         _coverArtBytes = data
         _trackInfo.value = _trackInfo.value.copy(coverArt = bmp)
@@ -1090,6 +1229,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onProgress(start: Long, curr: Long, end: Long) {
+        if (_dlnaActive.value) return
         val rate = 44100.0
         val posMs = ((curr - start) / rate * 1000).toLong().coerceAtLeast(0)
         val durMs = ((end - start) / rate * 1000).toLong().coerceAtLeast(0)
@@ -1105,6 +1245,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onAudioTeardown() {
+        if (_dlnaActive.value) return
         _setPlaying(false)
     }
 
@@ -1114,7 +1255,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     override fun onMirrorRunning(running: Boolean) {
-        if (running) videoRenderer.startSession() else {
+        if (!running && _dlnaActive.value) return
+        if (running) {
+            if (_dlnaActive.value) {
+                _stopDlnaPlayback("DLNA replaced by AirPlay mirror", returnToBackground = false)
+            }
+            videoRenderer.startSession()
+        } else {
             videoRenderer.stopSession()
             _mirroringActive.value = false
         }
@@ -1378,6 +1525,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
 
     private fun launchMainActivity() {
         Handler(Looper.getMainLooper()).post {
+            if (!_dlnaActive.value && !hasAirPlaySession()) return@post
             val returnToBackground = !MainActivity.isVisible()
             val launchIntent = Intent(this, MainActivity::class.java)
                 .addFlags(
@@ -1386,7 +1534,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
                         Intent.FLAG_ACTIVITY_SINGLE_TOP
                 )
                 .putExtra(MainActivity.EXTRA_RETURN_TO_BACKGROUND, returnToBackground)
+                .putExtra(MainActivity.EXTRA_SHOW_PLAYBACK, true)
             try {
+                Log.i(TAG, "Launching playback UI; returnToBackground=$returnToBackground")
                 startActivity(launchIntent)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to launch activity", e)
@@ -1395,9 +1545,13 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
     }
 
     private fun launchPendingMainActivity() {
-        if (!pendingMainActivityLaunch) return
-        pendingMainActivityLaunch = false
-        if (!MainActivity.isVisible()) launchMainActivity()
+        _mainHandler.post {
+            if (!pendingMainActivityLaunch) return@post
+            pendingMainActivityLaunch = false
+            // An existing Activity can be on a settings tab or in PiP; it still
+            // needs an explicit request to present the ready playback session.
+            launchMainActivity()
+        }
     }
 
     private fun _mediaAction(action: String): PendingIntent {

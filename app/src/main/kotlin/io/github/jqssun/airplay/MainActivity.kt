@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val EXTRA_RETURN_TO_BACKGROUND =
             "io.github.jqssun.airplay.extra.RETURN_TO_BACKGROUND"
+        const val EXTRA_SHOW_PLAYBACK = "io.github.jqssun.airplay.extra.SHOW_PLAYBACK"
 
         @Volatile
         private var visibleActivity = WeakReference<MainActivity>(null)
@@ -45,7 +46,7 @@ class MainActivity : ComponentActivity() {
         @Volatile
         private var activityVisible = false
 
-        fun isVisible(): Boolean = activityVisible
+        fun isVisible(): Boolean = activityVisible && visibleActivity.get()?.isInPip?.value != true
 
         fun requestReturnToBackground() {
             visibleActivity.get()?.let { activity ->
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
     private var service: AirPlayService? = null
     private var returnToBackgroundAfterDisconnect = false
     private val autoSession = mutableStateOf(false)
+    private val playbackLaunchId = mutableStateOf(0L)
     val isInPip = mutableStateOf(false)
     private val logCallback: (String) -> Unit = { viewModel.addLog(it) }
     private val pinCallback: (String?) -> Unit = { viewModel.showPin(it) }
@@ -88,6 +90,7 @@ class MainActivity : ComponentActivity() {
         returnToBackgroundAfterDisconnect =
             intent.getBooleanExtra(EXTRA_RETURN_TO_BACKGROUND, false)
         autoSession.value = returnToBackgroundAfterDisconnect
+        if (intent.getBooleanExtra(EXTRA_SHOW_PLAYBACK, false)) playbackLaunchId.value++
         enableEdgeToEdge()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -108,8 +111,8 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                combine(viewModel.keepScreenOn, viewModel.connectionCount) { keep, conns ->
-                    keep && conns > 0
+                combine(viewModel.keepScreenOn, viewModel.connectionCount, viewModel.dlnaActive) { keep, conns, dlna ->
+                    keep && (conns > 0 || dlna)
                 }.collect { on ->
                     if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -135,6 +138,7 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     viewModel = viewModel,
                     autoSession = autoSession.value,
+                    playbackLaunchId = playbackLaunchId.value,
                     isInPip = isInPip.value,
                     onSurfaceAvailable = { viewModel.onSurfaceAvailable(it) },
                     onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
@@ -147,9 +151,12 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        returnToBackgroundAfterDisconnect =
-            intent.getBooleanExtra(EXTRA_RETURN_TO_BACKGROUND, false)
+        val showPlayback = intent.getBooleanExtra(EXTRA_SHOW_PLAYBACK, false)
+        val autoLaunch = intent.getBooleanExtra(EXTRA_RETURN_TO_BACKGROUND, false)
+        returnToBackgroundAfterDisconnect = autoLaunch || (showPlayback && returnToBackgroundAfterDisconnect)
         autoSession.value = returnToBackgroundAfterDisconnect
+        viewModel.updateFromService()
+        if (showPlayback) playbackLaunchId.value++
     }
 
     fun enterPip() {
@@ -201,7 +208,7 @@ class MainActivity : ComponentActivity() {
         // never stop mid-session
         if (!viewModel.runInBackground.value && !isChangingConfigurations &&
             viewModel.serverState.value == AirPlayService.ServerState.RUNNING &&
-            viewModel.connectionCount.value == 0) {
+            viewModel.connectionCount.value == 0 && !viewModel.dlnaActive.value) {
             viewModel.stopServer()
         }
     }

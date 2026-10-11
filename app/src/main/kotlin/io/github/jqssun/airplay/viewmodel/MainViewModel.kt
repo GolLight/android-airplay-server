@@ -77,6 +77,7 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     private val logFile = File(app.filesDir, "airplay_logs.txt")
     private val audioManager = app.getSystemService(AudioManager::class.java)
     private var service: AirPlayService? = null
+    private var trackInfoJob: Job? = null
     val dacpPlayer: Player? get() = service?.dacpPlayer
 
     fun audioVolumeUp() {
@@ -106,7 +107,7 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     private val _videoResolution = MutableStateFlow("")
     val videoResolution: StateFlow<String> = _videoResolution.asStateFlow()
 
-    private val _serverName = MutableStateFlow(prefs.getString(Prefs.SERVER_NAME, Prefs.DEF_SERVER_NAME)!!)
+    private val _serverName = MutableStateFlow(Prefs.defaultServerName(prefs))
     val serverName: StateFlow<String> = _serverName.asStateFlow()
 
     private val _dlnaEnabled = MutableStateFlow(DlnaSettings.isEnabled(app))
@@ -228,6 +229,14 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     private val _dlnaImage = MutableStateFlow<Bitmap?>(null)
     val dlnaImage: StateFlow<Bitmap?> = _dlnaImage.asStateFlow()
+    private val _dlnaVideoPreview = MutableStateFlow<Bitmap?>(null)
+    val dlnaVideoPreview = _dlnaVideoPreview.asStateFlow()
+
+    private val _dlnaVolume = MutableStateFlow(100)
+    val dlnaVolume: StateFlow<Int> = _dlnaVolume.asStateFlow()
+
+    private val _dlnaMuted = MutableStateFlow(false)
+    val dlnaMuted: StateFlow<Boolean> = _dlnaMuted.asStateFlow()
 
     // video channel polling but /play not received yet
     private val _videoSessionPending = MutableStateFlow(false)
@@ -449,11 +458,29 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
 
     // service binding
     fun bindService(svc: AirPlayService) {
+        trackInfoJob?.cancel()
         service = svc
+        _trackInfo.value = svc.trackInfo.value
+        _dlnaVideoPreview.value = svc.dlnaVideoPreview.value
         updateFromService()
+        // Lyrics are event-driven; the 200 ms playback poll remains for progress.
+        trackInfoJob = viewModelScope.launch {
+            launch {
+                svc.trackInfo.collect { info ->
+                    if (service === svc) _trackInfo.value = info
+                }
+            }
+            launch {
+                svc.dlnaVideoPreview.collect { preview ->
+                    if (service === svc) _dlnaVideoPreview.value = preview
+                }
+            }
+        }
     }
 
     fun unbindService() {
+        trackInfoJob?.cancel()
+        trackInfoJob = null
         service = null
     }
 
@@ -535,6 +562,7 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
     fun playDlna() { service?.playDlna() }
     fun pauseDlna() { service?.pauseDlna() }
     fun seekDlna(positionMs: Long) { service?.seekDlna(positionMs) }
+    fun seekDlnaBy(deltaMs: Long) { service?.seekDlnaBy(deltaMs) }
     fun stopDlna() { service?.stopDlna() }
     fun dlnaVolumeUp() { service?.dlnaVolumeUp() }
     fun dlnaVolumeDown() { service?.dlnaVolumeDown() }
@@ -594,6 +622,8 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
             _videoPlaybackActive.value = videoActive
             _dlnaActive.value = it.dlnaActive.value
             _dlnaImage.value = it.dlnaImage.value
+            _dlnaVolume.value = it.dlnaVolume.value
+            _dlnaMuted.value = it.dlnaMuted.value
             _videoSessionPending.value = it.videoSessionPending()
             _videoDownloadProgress.value = it.videoDownloader.progress.value
             val dlnaAudio = it.dlnaActive.value && it.audioOnly.value
@@ -617,13 +647,17 @@ class MainViewModel @Inject constructor(app: Application) : AndroidViewModel(app
                 if (SystemClock.elapsedRealtime() - _videoActionAt > VIDEO_ACTION_SYNC_HOLD_MS) {
                     _videoPlaying.value = info.playing
                 }
+            } else if (it.audioOnly.value) {
+                _videoPositionMs.value = it.currentPositionMs()
+                _videoDurationMs.value = it.durationMs.value
+                _videoPlaying.value = it.playing.value
+                _videoBuffering.value = false
             } else {
                 _videoPositionMs.value = 0
                 _videoDurationMs.value = 0
                 _videoBuffering.value = false
             }
             _mirroringActive.value = it.mirroringActive.value
-            _trackInfo.value = it.trackInfo.value
             if (_debugEnabled.value) {
                 _debugInfo.value = it.collectDebugInfo()
             }

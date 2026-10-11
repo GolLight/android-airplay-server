@@ -9,6 +9,10 @@ data class TrackInfo(
     val genre: String = "",
     val durationMs: Long = 0,
     val coverArt: Bitmap? = null,
+    val lyrics: String = "",
+    // Live AirPlay packets describe the current line, not a future LRC cue.
+    val liveLyrics: Boolean = false,
+    val airPlayIdentityPacket: Boolean = false,
 ) {
     companion object {
         fun fromDmap(map: Map<String, Any>, existingArt: Bitmap? = null): TrackInfo {
@@ -21,6 +25,10 @@ data class TrackInfo(
                 genre = flat["asgn"] as? String ?: "",
                 durationMs = (flat["astm"] as? Long) ?: 0L,
                 coverArt = existingArt,
+                lyrics = listOf("asly", "lyrics", "lyric", "lrc")
+                    .asSequence().mapNotNull { flat[it] as? String }
+                    .firstOrNull { it.isNotBlank() }.orEmpty(),
+                airPlayIdentityPacket = flat.containsKey("asdk"),
             )
         }
 

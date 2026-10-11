@@ -12,6 +12,10 @@ data class DlnaMedia(
     val artist: String = "",
     val album: String = "",
     val artUri: String = "",
+    val lyricsUri: String = "",
+    val lyrics: String = "",
+    /** Duration advertised by the sender's DIDL-Lite metadata, when present. */
+    val durationMs: Long = 0L,
 )
 
 data class DlnaPlayerSnapshot(
@@ -23,4 +27,5 @@ data class DlnaPlayerSnapshot(
     val muted: Boolean = false,
     val image: Bitmap? = null,
     val videoReady: Boolean = false,
+    val videoPreview: Bitmap? = null,
 )

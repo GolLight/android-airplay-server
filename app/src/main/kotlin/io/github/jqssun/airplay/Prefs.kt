@@ -1,13 +1,30 @@
 package io.github.jqssun.airplay
 
+import android.content.SharedPreferences
 import android.media.MediaFormat
+import java.security.SecureRandom
 
 /** Centralized preference keys and defaults. */
 object Prefs {
     const val NAME = "settings"
     const val AUTO = "auto"; const val ON = "on"; const val OFF = "off"
 
-    const val SERVER_NAME = "server_name"; const val DEF_SERVER_NAME = "Android AirPlay"
+    const val SERVER_NAME = "server_name"
+    const val DEF_SERVER_NAME_PREFIX = "镜像投屏"
+    private val serverNameRandom = SecureRandom()
+
+    /**
+     * Returns the persisted device name or creates a stable four-digit default
+     * for a fresh installation.
+     */
+    fun defaultServerName(prefs: SharedPreferences): String {
+        val stored = prefs.getString(SERVER_NAME, null)?.trim()
+        if (!stored.isNullOrEmpty()) return stored
+        val suffix = serverNameRandom.nextInt(10_000).toString().padStart(4, '0')
+        return "$DEF_SERVER_NAME_PREFIX$suffix".also {
+            prefs.edit().putString(SERVER_NAME, it).apply()
+        }
+    }
     const val FALLBACK_MAC_ADDRESS = "fallback_mac_address"
     const val SERVER_PORT = "server_port"; const val DEF_SERVER_PORT = 7000
     const val AUTO_START = "auto_start"; const val DEF_AUTO_START = true

@@ -1,5 +1,6 @@
 package io.github.jqssun.airplay.renderer
 
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLSurface
@@ -36,6 +37,11 @@ class VideoPipeline {
     private var surfaceTexture: SurfaceTexture? = null
     var inputSurface: Surface? = null; private set
     var onFrameRendered: (() -> Unit)? = null
+    // Optional one-shot preview for a background DLNA decoder. AirPlay does
+    // not request a preview and retains its existing rendering path.
+    var onFirstFrameCaptured: ((Bitmap) -> Unit)? = null
+    var onFrameCaptureFailed: (() -> Unit)? = null
+    private var frameCaptured = false
 
     @Volatile private var frameAvailable = false
     private var pendingDisplay: Surface? = null
@@ -138,6 +144,7 @@ class VideoPipeline {
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
             hasFrame = true
+            _captureFirstFrame()
             onFrameRendered?.invoke()
             return
         }
@@ -145,12 +152,18 @@ class VideoPipeline {
         st.updateTexImage()
         st.getTransformMatrix(texMatrix)
         hasFrame = true
+        _captureFirstFrame()
         _render()
         onFrameRendered?.invoke()
     }
 
     private fun _render() {
-        GLES20.glViewport(0, 0, winW, winH)
+        _draw(winW, winH)
+        egl?.swap(window)
+    }
+
+    private fun _draw(width: Int, height: Int) {
+        GLES20.glViewport(0, 0, width, height)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -163,7 +176,48 @@ class VideoPipeline {
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aTex)
-        egl?.swap(window)
+    }
+
+    private fun _captureFirstFrame() {
+        val callback = onFirstFrameCaptured ?: return
+        if (frameCaptured) return
+        frameCaptured = true
+        // Bound the one-time readback to 720p. It is never part of foreground
+        // playback; the decoder switches directly to the display surface.
+        val sourceW = videoW.takeIf { it > 0 } ?: 1280
+        val sourceH = videoH.takeIf { it > 0 } ?: 720
+        val scale = minOf(1f, 1280f / sourceW, 720f / sourceH)
+        val width = (sourceW * scale).toInt().coerceAtLeast(1)
+        val height = (sourceH * scale).toInt().coerceAtLeast(1)
+        val texture = IntArray(1)
+        val framebuffer = IntArray(1)
+        GLES20.glGenTextures(1, texture, 0)
+        GLES20.glGenFramebuffers(1, framebuffer, 0)
+        try {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture[0])
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, width, height, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer[0])
+            GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, texture[0], 0)
+            check(GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER) == GLES20.GL_FRAMEBUFFER_COMPLETE)
+            _draw(width, height)
+            val pixels = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
+            GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, pixels)
+            val raw = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            raw.copyPixelsFromBuffer(pixels)
+            val flip = android.graphics.Matrix().apply { setScale(1f, -1f) }
+            val preview = Bitmap.createBitmap(raw, 0, 0, width, height, flip, false)
+            if (preview !== raw) raw.recycle()
+            callback(preview)
+        } catch (e: Exception) {
+            Log.w(TAG, "First-frame preview failed", e)
+            onFrameCaptureFailed?.invoke()
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+            GLES20.glDeleteFramebuffers(1, framebuffer, 0)
+            GLES20.glDeleteTextures(1, texture, 0)
+        }
     }
 
     private fun _initGl() {
