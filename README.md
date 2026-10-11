@@ -1,69 +1,97 @@
-# AirPlay Receiver for Android
+# AirPlay & DLNA Receiver for Android
 
-[![Stars](https://img.shields.io/github/stars/jqssun/android-airplay-server)](https://github.com/jqssun/android-airplay-server)
-[![GitHub](https://img.shields.io/github/downloads/jqssun/android-airplay-server/total?label=GitHub&logo=GitHub)](https://github.com/jqssun/android-airplay-server/releases)
-[![license](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/jqssun/android-airplay-server/blob/main/LICENSE)
-[![build](https://img.shields.io/github/actions/workflow/status/jqssun/android-airplay-server/apk.yml?label=build)](https://github.com/jqssun/android-airplay-server/actions/workflows/apk.yml)
-[![release](https://img.shields.io/github/v/release/jqssun/android-airplay-server)](https://github.com/jqssun/android-airplay-server/releases)
+[![Stars](https://img.shields.io/github/stars/GolLight/android-airplay-server)](https://github.com/GolLight/android-airplay-server)
+[![GitHub](https://img.shields.io/github/downloads/GolLight/android-airplay-server/total?label=GitHub&logo=GitHub)](https://github.com/GolLight/android-airplay-server/releases)
+[![license](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/GolLight/android-airplay-server/blob/main/LICENSE)
+[![build](https://img.shields.io/github/actions/workflow/status/GolLight/android-airplay-server/apk.yml?label=build)](https://github.com/GolLight/android-airplay-server/actions/workflows/apk.yml)
+[![release](https://img.shields.io/github/v/release/GolLight/android-airplay-server)](https://github.com/GolLight/android-airplay-server/releases)
 
-A fully featured free and open-source implementation of AirPlay for Android that turns your device into an AirPlay-compatible display and speaker, based on [UxPlay](https://github.com/FDH2/UxPlay). It is the first open-source AirPlay 2 receiver for Android and Android TV, and works with iOS/iPadOS, macOS devices as well as other sender implementations.
+An open-source AirPlay and DLNA receiver for Android and Android TV. It turns an Android device into a wireless display and media renderer: iPhone, iPad and Mac can use AirPlay for screen mirroring, audio and video, while Android and Windows DLNA sender apps can cast videos, music and pictures over the local network. AirPlay support is based on [UxPlay](https://github.com/FDH2/UxPlay).
 
 [<img height="48" alt="Get it on Google Play" src="https://jqssun.github.io/images/badges/google-play-store.svg">](https://play.google.com/store/apps/details?id=io.github.jqssun.airplay)
 [<img height="48" alt="Get it on F-Droid" src="https://jqssun.github.io/images/badges/fdroid.svg">](https://f-droid.org/packages/io.github.jqssun.airplay)
-[<img height="48" alt="Get it on GitHub" src="https://jqssun.github.io/images/badges/github.svg">](https://github.com/jqssun/android-airplay-server/releases/latest)
+[<img height="48" alt="Get it on GitHub" src="https://jqssun.github.io/images/badges/github.svg">](https://github.com/GolLight/android-airplay-server/releases/latest)
 
 <video loop src='https://github.com/user-attachments/assets/79ed7c0c-0102-43cc-8816-4f00ce6a4199' alt="demo" width="200" style="display: block; margin: auto;"></video>
 
 ## Compatibility
 
-- Android 7.0+, including Android TV
-- AirPlay devices on the same subnet, including iOS/iPadOS, macOS devices, or other sender implementations
+- Android 7.0+, including Android TV and compatible Android projectors
+- AirPlay senders on the same local network, including iOS/iPadOS and macOS
+- DLNA senders on the same local network, including compatible Android and Windows apps
+- Media URLs must be reachable by the Android receiver; support for a particular app depends on the URL and codec it provides
 
 ## Features
 
+### AirPlay
+
 - Screen mirroring with H.264 and H.265 (HEVC) video decoding
 - Audio streaming with AAC-ELD, AAC-LC and ALAC audio decoding
-- Video playback with support for HLS, downloads, and remote controls
-- Music playback with track information, cover art, and remote controls
-- Support for Android TV with directional pad navigation and seeking controls
-- Support for Picture-in-Picture, automatic resolution and mode switching
+- AirPlay video playback with HLS, downloads and remote controls
+- Music playback with track information, cover art, lyrics and remote controls
+- Automatic resolution and display mode switching, Picture-in-Picture and Android TV navigation
 - Optional PIN authentication
-- Video resolution, overscan, and frame rate control
-- Audio latency control and support for software decoder fallback
-- Debug overlay with real-time statistics (FPS, bitrate, codec, resolution, frame count, audio volume, etc.)
-- Android native media session integration with notification controls
+- Video resolution, overscan and frame-rate controls
+- Audio latency controls and software decoder fallback
+- Debug overlay with real-time statistics such as FPS, bitrate, codec and resolution
+- Android media-session integration with notification controls
+
+### DLNA
+
+- Standard DLNA MediaRenderer discovery over SSDP
+- `AVTransport`, `RenderingControl` and `ConnectionManager` services
+- Video playback through Media3, including HTTP/HTTPS media and HLS where supported
+- Music playback with title, artist, album art, lyrics and transport controls
+- JPEG and PNG image casting with background download and decode
+- Play, pause, stop, seek, volume and mute controls where the sender supports them
+- SOAP event subscriptions so sender progress follows the receiver state
+- AirPlay and DLNA sessions are isolated and share one active playback surface
+
+## Usage
+
+1. Install the APK from the [GitHub Releases](https://github.com/GolLight/android-airplay-server/releases) page.
+2. Open the app on the Android TV or projector and start the receiver. Grant the overlay permission if background launch is enabled.
+3. Keep the sender and receiver on the same local network. A fresh installation advertises a stable name such as `镜像投屏1234`; the name can be changed in Settings.
+4. On iPhone/iPad or Mac, choose the receiver from Screen Mirroring or AirPlay.
+5. In an Android or Windows app that supports DLNA, choose the receiver from the Cast/Play to device list.
+
+DLNA media casting does not provide universal Android full-screen mirroring. Full-screen Android mirroring depends on the sender phone and its supported protocol.
 
 > [!WARNING]
-> DRM content (e.g. from the Apple TV application) is not supported.
+> DRM-protected content, such as content from the Apple TV application, is not supported. Actual quality depends on the source stream, network and Android hardware decoder.
 
 ## Implementation
 
-This application uses the C-based [UxPlay](https://github.com/FDH2/UxPlay) library to implement the AirPlay/RAOP protocol, with a JNI bridge to the Android application layer. Audio can be decoded via MediaCodec or a software ALAC decoder, while mirroring video is decoded via MediaCodec and rendered to a SurfaceView. HLS sessions are served through a local playlist proxy.
+AirPlay/RAOP and FairPlay/HLS handling use the C-based [UxPlay](https://github.com/FDH2/UxPlay) library through a JNI bridge. AirPlay audio is decoded by MediaCodec or the software ALAC decoder, and mirroring video is rendered through Android `SurfaceView` and MediaCodec.
+
+The DLNA receiver is a Kotlin module built on Android networking and Media3. It exposes SSDP discovery, HTTP device descriptions, SOAP control endpoints and event notifications. Video and music use the Media3 player; images are downloaded and decoded off the main thread. AirPlay and DLNA share the foreground service and display pipeline while keeping protocol sessions separate.
 
 ```mermaid
 flowchart LR
-    AppleDevice["Apple Device (Sender)"]
-    UxPlay["UxPlay (C/JNI)<br/>RAOP + mDNS<br/>FairPlay + HLS"]
-    AndroidApp["Android (Receiver)<br/>MediaCodec + AudioTrack<br/>ExoPlayer (HLS)"]
-
-    AppleDevice -- "RAOP / HLS" --> UxPlay
-    UxPlay --> AndroidApp
+    AppleDevice["iPhone / iPad / Mac"] -- "AirPlay / RAOP / HLS" --> UxPlay["UxPlay C/JNI"]
+    AndroidSender["Android / Windows DLNA app"] -- "SSDP / SOAP / HTTP" --> Dlna["Kotlin DLNA MediaRenderer"]
+    UxPlay --> Service["Android foreground service"]
+    Dlna --> Service
+    Service --> Media3["Media3 player"]
+    Service --> Surface["Android display surface"]
+    Service --> Audio["AudioTrack / media session"]
 ```
 
-CMake is used for native C/C++ components under [`app/src/main/cpp`](app/src/main/cpp). Submodules must be initialized before building. 
+CMake is used for native C/C++ components under [`app/src/main/cpp`](app/src/main/cpp). Submodules must be initialized before building:
 
 ```bash
 git submodule update --init --recursive
 ./gradlew assembleDebug
 ```
 
-Check out the [CI](https://github.com/jqssun/android-airplay-server/blob/main/.github/workflows/apk.yml) for more details on reproducible builds.
+The release build includes `arm64-v8a`, `armeabi-v7a` and `x86_64`. See the [CI workflow](https://github.com/GolLight/android-airplay-server/blob/main/.github/workflows/apk.yml) for reproducible build details.
 
 ## Credits
 
-- [UxPlay](https://github.com/FDH2/UxPlay) for the AirPlay/RAOP server implementation
+- [UxPlay](https://github.com/FDH2/UxPlay) for AirPlay/RAOP and FairPlay support
 - [FFmpeg](https://ffmpeg.org) for the lossless audio decoder
-- [Next Player](https://github.com/anilbeesetti/nextplayer) for the video player
+- [Media3](https://github.com/androidx/media) for media playback components
+- [Next Player](https://github.com/anilbeesetti/nextplayer) for the video player foundation
 
 ---
 
