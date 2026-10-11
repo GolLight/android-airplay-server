@@ -8,8 +8,6 @@
 
 An open-source AirPlay and DLNA receiver for Android and Android TV. It turns an Android device into a wireless display and media renderer: iPhone, iPad and Mac can use AirPlay for screen mirroring, audio and video, while Android and Windows DLNA sender apps can cast videos, music and pictures over the local network. AirPlay support is based on [UxPlay](https://github.com/FDH2/UxPlay).
 
-[<img height="48" alt="Get it on Google Play" src="https://jqssun.github.io/images/badges/google-play-store.svg">](https://play.google.com/store/apps/details?id=io.github.jqssun.airplay)
-[<img height="48" alt="Get it on F-Droid" src="https://jqssun.github.io/images/badges/fdroid.svg">](https://f-droid.org/packages/io.github.jqssun.airplay)
 [<img height="48" alt="Get it on GitHub" src="https://jqssun.github.io/images/badges/github.svg">](https://github.com/GolLight/android-airplay-server/releases/latest)
 
 <video loop src='https://github.com/user-attachments/assets/79ed7c0c-0102-43cc-8816-4f00ce6a4199' alt="demo" width="200" style="display: block; margin: auto;"></video>
@@ -92,6 +90,7 @@ The release build includes `arm64-v8a`, `armeabi-v7a` and `x86_64`. See the [CI 
 - [FFmpeg](https://ffmpeg.org) for the lossless audio decoder
 - [Media3](https://github.com/androidx/media) for media playback components
 - [Next Player](https://github.com/anilbeesetti/nextplayer) for the video player foundation
+- Based on the original [jqssun/android-airplay-server](https://github.com/jqssun/android-airplay-server) repository
 
 ---
 

@@ -1,1 +1,0 @@
-AirPlay and DLNA receiver for Android with screen mirroring, video, music and image casting.
