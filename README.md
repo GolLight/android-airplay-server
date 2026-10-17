@@ -92,6 +92,10 @@ The release build includes `arm64-v8a`, `armeabi-v7a` and `x86_64`. See the [CI 
 - [Next Player](https://github.com/anilbeesetti/nextplayer) for the video player foundation
 - Based on the original [jqssun/android-airplay-server](https://github.com/jqssun/android-airplay-server) repository
 
+This fork was developed with OpenAI Codex.
+
+Maintenance policy: `main` tracks the upstream repository and stays free of fork-specific changes. Fork-specific features, device adaptations and experiments are kept on feature branches and are rebased onto the latest upstream `main` before review or release.
+
 ---
 
 Disclaimer: This project is not affiliated with Apple Inc.

@@ -60,6 +60,7 @@ import androidx.compose.ui.layout.ContentScale
 import android.content.Context
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -138,10 +139,18 @@ fun MainScreen(
     // don't use movableContentOf: moving AndroidView across subcomposition boundaries makes it crash on reparent
     val video: @Composable () -> Unit = {
         val aspect by viewModel.videoAspect.collectAsState()
+        val resolution by viewModel.videoResolution.collectAsState()
+        val mode = LocalView.current.display?.mode
+        val bufferSize = if (fullscreen && mirroringActive && !isInPip && isTv() && mode != null) {
+            remember(resolution, mode.physicalWidth, mode.physicalHeight) {
+                mirrorSurfaceBufferSize(resolution, mode.physicalWidth, mode.physicalHeight)
+            }
+        } else null
         VideoSurfaceView(
             onSurfaceAvailable = onSurfaceAvailable,
             onSurfaceDestroyed = onSurfaceDestroyed,
-            aspectRatio = aspect
+            aspectRatio = aspect,
+            bufferSizePx = bufferSize
         )
     }
 
