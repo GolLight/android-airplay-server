@@ -33,6 +33,7 @@ An open-source AirPlay and DLNA receiver for Android and Android TV. It turns an
 - Audio latency controls and software decoder fallback
 - Debug overlay with real-time statistics such as FPS, bitrate, codec and resolution
 - Android media-session integration with notification controls
+- Wired secondary display over USB tethering
 
 ### DLNA
 
@@ -58,11 +59,33 @@ DLNA media casting does not provide universal Android full-screen mirroring. Ful
 > [!WARNING]
 > DRM-protected content, such as content from the Apple TV application, is not supported. Actual quality depends on the source stream, network and Android hardware decoder.
 
+## Configure from ADB
+
+On devices without a display, settings can also be changed over ADB. The receiver is protected by `android.permission.DUMP` so regular installed apps cannot change them. Values are passed as text using `--es`. Using `adb shell`:
+
+```bash
+export KEY="server_name" VALUE="Speaker"
+am broadcast -n io.github.jqssun.airplay/.SettingsReceiver -a io.github.jqssun.airplay.SET_SETTING --es key "$KEY" --es value "$VALUE"
+```
+
+To list all settings with their current values as JSON:
+
+```bash
+am start -n io.github.jqssun.airplay/.MainActivity
+am broadcast -n io.github.jqssun.airplay/.SettingsReceiver -a io.github.jqssun.airplay.LIST_SETTINGS
+```
+
 ## Implementation
 
-AirPlay/RAOP and FairPlay/HLS handling use the C-based [UxPlay](https://github.com/FDH2/UxPlay) library through a JNI bridge. AirPlay audio is decoded by MediaCodec or the software ALAC decoder, and mirroring video is rendered through Android `SurfaceView` and MediaCodec.
+AirPlay/RAOP and FairPlay/HLS handling use the C-based [UxPlay](https://github.com/FDH2/UxPlay) library through a JNI bridge. AirPlay audio is decoded by MediaCodec or FFmpeg's AAC/ALAC decoders, and mirroring video is rendered through Android `SurfaceView` and MediaCodec.
 
 The DLNA receiver is a Kotlin module built on Android networking and Media3. It exposes SSDP discovery, HTTP device descriptions, SOAP control endpoints and event notifications. Video and music use the Media3 player; images are downloaded and decoded off the main thread. AirPlay and DLNA share the foreground service and display pipeline while keeping protocol sessions separate.
+
+When using USB tethering, the Android device can act as a reliable secondary display over a wired connection. Apple devices natively support USB tethering over CDC-NCM, so on Android devices that default to RNDIS, you may need to switch to CDC-NCM over ADB:
+
+```bash
+adb shell settings put global tether_force_usb_functions 1
+```
 
 ```mermaid
 flowchart LR
@@ -94,7 +117,7 @@ The release build includes `arm64-v8a`, `armeabi-v7a` and `x86_64`. See the [CI 
 
 This fork was developed with OpenAI Codex.
 
-Maintenance policy: `main` tracks the upstream repository and stays free of fork-specific changes. Fork-specific features, device adaptations and experiments are kept on feature branches and are rebased onto the latest upstream `main` before review or release.
+Maintenance policy: `main` is this fork's maintained branch, including DLNA and AirPlay improvements. `sync/upstream-main` integrates new upstream changes by rebasing the fork's commits onto the latest upstream `main` for review before updating this fork's `main`. Contributions back to the original repository are prepared separately; DLNA is maintained in this fork and is excluded from those contributions. Development is assisted by OpenAI Codex.
 
 ---
 
