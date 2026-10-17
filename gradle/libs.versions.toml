@@ -1,9 +1,9 @@
 [versions]
-agp = "8.9.2"
-kotlin = "2.1.0"
-ksp = "2.1.0-1.0.29"
+agp = "9.4.1"
+kotlin = "2.2.10"
+ksp = "2.3.12"
 compose-bom = "2024.12.01"
-hilt = "2.53.1"
+hilt = "2.60.1"
 hilt-navigation = "1.2.0"
 lifecycle = "2.8.7"
 activity-compose = "1.9.3"
@@ -45,7 +45,6 @@ oboe = { group = "com.google.oboe", name = "oboe", version.ref = "oboe" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
