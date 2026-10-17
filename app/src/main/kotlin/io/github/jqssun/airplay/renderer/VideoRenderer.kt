@@ -22,6 +22,12 @@ class VideoRenderer(ctx: Context) {
     private var videoWidth = 0
     private var videoHeight = 0
     private var firstFrameQueued = false
+    private var outputThread: Thread? = null
+    private var codecGeneration = 0L
+    private var pendingOutputs = 0
+    private var lastQueueNs = 0L
+    private val outputInfo = MediaCodec.BufferInfo()
+
 
     // stats
     @Volatile var fps = 0; private set
@@ -83,7 +89,9 @@ class VideoRenderer(ctx: Context) {
             .reduceOrNull { (w1, h1), (w2, h2) -> minOf(w1, w2) to minOf(h1, h2) } ?: (1920 to 1080)
 
     // codec per mirror session; pipeline persists across sessions
-    fun startSession() = synchronized(lock) { _resetStats() }
+    fun startSession() = synchronized(lock) {
+        _resetStats()
+    }
 
     fun stopSession() = synchronized(lock) { stopCodec() }
 
@@ -91,13 +99,16 @@ class VideoRenderer(ctx: Context) {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
         droppedFrames = 0; framePacingJitterUs = 0
         _framesThisSec = 0; _bytesThisSec = 0
+        _lastStatReset = 0L
     }
 
     private fun _updateStats(size: Int) {
-        val now = System.currentTimeMillis()
-        if (now - _lastStatReset >= 1000) {
-            fps = _framesThisSec
-            bitrateBps = _bytesThisSec * 8
+        val now = System.nanoTime()
+        if (_lastStatReset == 0L) _lastStatReset = now
+        val elapsed = now - _lastStatReset
+        if (elapsed >= 1_000_000_000L) {
+            fps = (_framesThisSec * 1_000_000_000L / elapsed).toInt()
+            bitrateBps = (_bytesThisSec * 8 * 1_000_000_000L / elapsed)
             framePacingJitterUs = _computeFramePacingJitterUs()
             _framesThisSec = 0
             _bytesThisSec = 0
@@ -154,7 +165,10 @@ class VideoRenderer(ctx: Context) {
                 buf.clear()
                 buf.put(data)
                 c.queueInputBuffer(idx, 0, data.size, ntpTimeNs / 1000, 0)
+                pendingOutputs++
+                lastQueueNs = System.nanoTime()
                 firstFrameQueued = true
+                lock.notifyAll()
                 return
             }
             drainOutput()
@@ -246,9 +260,16 @@ class VideoRenderer(ctx: Context) {
         }
         codec = c
         codecName = (if (h265) "H.265" else "H.264") + " (${c.name})"
+        _startOutputPump(c)
     }
 
     private fun stopCodec() {
+        // Invalidate before releasing. An old pump can never touch a replacement codec.
+        codecGeneration++
+        outputThread = null
+        pendingOutputs = 0
+        lastQueueNs = 0L
+        lock.notifyAll()
         _frameIntervalIdx = 0
         _frameIntervalCount = 0
         _lastOutputFrameNs = 0L
@@ -263,12 +284,50 @@ class VideoRenderer(ctx: Context) {
         codec = null
     }
 
-    private fun drainOutput() {
+    private fun _startOutputPump(c: MediaCodec) {
+        val generation = ++codecGeneration
+        outputThread = Thread({
+            synchronized(lock) {
+                while (codec === c && generation == codecGeneration) {
+                    if (pendingOutputs == 0) {
+                        lock.wait()
+                        continue
+                    }
+                    try {
+                        drainOutput(fromPump = true)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Output error, resetting", e)
+                        stopCodec()
+                        break
+                    }
+                    if (codec === c && generation == codecGeneration && pendingOutputs > 0) {
+                        // Dropped/configuration buffers can leave the estimate nonzero.
+                        // Back off for an idle source, while still handling a late tail frame.
+                        val delay = if (System.nanoTime() - lastQueueNs < OUTPUT_FAST_POLL_NS) {
+                            OUTPUT_POLL_MS
+                        } else OUTPUT_IDLE_POLL_MS
+                        lock.wait(delay) // releases the codec lock while waiting
+                    }
+                }
+            }
+        }, "AirPlayVideoOutput").also { it.start() }
+    }
+
+    @Suppress("DEPRECATION") // INFO_OUTPUT_BUFFERS_CHANGED is still a valid synchronous event.
+    private fun drainOutput(fromPump: Boolean = false) {
         val c = codec ?: return
-        val info = MediaCodec.BufferInfo()
+        val info = outputInfo
         while (true) {
             val idx = c.dequeueOutputBuffer(info, 0)
-            if (idx < 0) break
+            when (idx) {
+                MediaCodec.INFO_TRY_AGAIN_LATER -> return
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    continue
+                }
+                MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> continue
+            }
+            if (idx < 0) return
+            pendingOutputs = (pendingOutputs - 1).coerceAtLeast(0)
             _recordOutputFrameTime()
             if (scheduledOutputBufferRelease) {
                 // schedule frame at VSYNC matching its NTP presentation time
@@ -284,10 +343,16 @@ class VideoRenderer(ctx: Context) {
         }
     }
 
-    fun release() = synchronized(lock) {
-        stopCodec()
+    fun release() {
+        val oldOutput = synchronized(lock) {
+            val old = outputThread
+            stopCodec()
+            _resetStats()
+            old
+        }
+        // Never join a worker while holding its lifecycle lock.
+        oldOutput?.join()
         pipeline.release()
-        _resetStats()
     }
 
     private fun _recordOutputFrameTime() {
@@ -322,5 +387,8 @@ class VideoRenderer(ctx: Context) {
         private const val FEED_WAIT_US = 20_000L
         private const val FEED_RETRIES = 10
         private const val FIRST_FEED_RETRIES = 50
+        private const val OUTPUT_POLL_MS = 2L
+        private const val OUTPUT_IDLE_POLL_MS = 100L
+        private const val OUTPUT_FAST_POLL_NS = 500_000_000L
     }
 }
