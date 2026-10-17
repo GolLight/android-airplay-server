@@ -343,15 +343,14 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeSetLang(
     raop_set_lang(ctx->raop, ctx->lang_requested.c_str(), ctx->lang_subtitles.c_str(), ctx->lang_system.c_str());
 }
 
-/* feature bit 9 advertises audio support over dns-sd */
 extern "C"
 JNIEXPORT void JNICALL
-Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeSetAudioEnabled(
-        JNIEnv *env, jobject thiz, jlong handle, jboolean enabled) {
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeSetFeature(
+        JNIEnv *env, jobject thiz, jlong handle, jint bit, jboolean enabled) {
 
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
     if (!ctx || !ctx->dnssd) return;
-    dnssd_set_airplay_features(ctx->dnssd, 9, enabled ? 1 : 0);
+    dnssd_set_airplay_features(ctx->dnssd, bit, enabled ? 1 : 0);
 }
 
 extern "C"
@@ -403,13 +402,13 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioConfigure(
         JNIEnv *env, jobject thiz, jlong handle, jint cushionMs, jint percentilePct,
-        jint oboeBufferFrames, jboolean forceSwAlac, jboolean realtimePriority, jboolean lowLatency,
-        jboolean benchmarkLog) {
+        jint oboeBufferFrames, jboolean forceSwAlac, jboolean forceSwAac, jboolean realtimePriority,
+        jboolean lowLatency, jboolean benchmarkLog) {
     server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
     if (!ctx || !ctx->cb_ctx.audio_engine) return JNI_FALSE;
     return audio_engine_configure(ctx->cb_ctx.audio_engine, cushionMs, percentilePct,
-                                  oboeBufferFrames, forceSwAlac, realtimePriority, lowLatency,
-                                  benchmarkLog) ? JNI_TRUE : JNI_FALSE;
+                                  oboeBufferFrames, forceSwAlac, forceSwAac, realtimePriority,
+                                  lowLatency, benchmarkLog) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C"

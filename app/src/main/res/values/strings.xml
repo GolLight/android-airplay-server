@@ -25,6 +25,10 @@
     <string name="stopped_label">Stopped</string>
     <string name="btn_start">Start</string>
     <string name="btn_stop">Stop</string>
+    <string name="btn_allow">Allow</string>
+    <string name="btn_open_settings">Open settings</string>
+    <string name="local_network_label">Nearby devices access needed</string>
+    <string name="local_network_desc">Allow access to nearby devices so AirPlay devices can find and connect to this device</string>
     <string name="unknown_track">Unknown</string>
 
     <!-- Content descriptions -->
@@ -104,6 +108,8 @@
     <string name="setting_keep_screen_on_desc">Prevent sleeping while a client is connected</string>
     <string name="setting_advertise_video">Advertise AirPlay video support</string>
     <string name="setting_advertise_video_desc">When off, videos are cast as audio only streams</string>
+    <string name="setting_advertise_mirroring">Advertise AirPlay mirroring support</string>
+    <string name="setting_advertise_mirroring_desc">When off, the device is hidden from mirroring</string>
     <string name="setting_advertise_audio">Advertise AirPlay audio support</string>
     <string name="setting_advertise_audio_desc">When off, the device can only be used for mirroring and will be hidden from media players</string>
     <string name="setting_alac">Advertise ALAC codec</string>
@@ -113,6 +119,11 @@
     <string name="setting_launch_on_connect">Open this application on connect</string>
     <string name="setting_launch_on_connect_desc">Show the screen when a client connects</string>
     <string name="setting_launch_on_connect_no_permission">Tap to grant Display over other apps permission</string>
+    <string name="setting_discovery">Discoverable over</string>
+    <string name="setting_discovery_all_desc">Advertise on all usable interfaces. Uses NsdManager.</string>
+    <string name="setting_discovery_usb_desc">Only advertise over USB tethering to enforce wired connection. Uses custom mDNS responder.</string>
+    <string name="chip_all_networks">All networks</string>
+    <string name="chip_usb_only">USB only</string>
     <string name="setting_resolution">Resolution</string>
     <string name="setting_resolution_desc">Video resolution advertised to clients</string>
     <string name="setting_resolution_placeholder">[W]x[H]</string>
@@ -133,7 +144,9 @@
     <string name="setting_enforce_sdr">MediaFormat.KEY_COLOR_TRANSFER</string>
     <string name="setting_enforce_sdr_desc">Tag video as limited SDR; disable to allow HDR sources to pass through</string>
     <string name="setting_sw_alac">Force software ALAC decoder</string>
-    <string name="setting_sw_alac_desc">Always use software ALAC decoder instead of hardware decoder, may affect audio latency</string>
+    <string name="setting_sw_alac_desc">Always use software ALAC decoder instead of system decoder, may affect latency</string>
+    <string name="setting_sw_aac">Force software AAC decoder</string>
+    <string name="setting_sw_aac_desc">Always use software AAC decoder instead of system decoder, may affect latency</string>
 
     <!-- Settings: Developer -->
     <string name="setting_developer_options">Developer options</string>

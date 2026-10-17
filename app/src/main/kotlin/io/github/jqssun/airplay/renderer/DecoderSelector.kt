@@ -53,6 +53,7 @@ class DecoderSelector(private val ctx: Context) {
             if (Build.VERSION.SDK_INT >= 26 && Build.DEVICE.startsWith("BRAVIA_")) add("omx.mtk")
             if (Build.VERSION.SDK_INT >= 28 && !Build.DEVICE.equals("sabrina", ignoreCase = true)) add("omx.amlogic")
             if (Build.VERSION.SDK_INT >= 28) add("omx.realtek")
+            add("omx.hisi")
             add("c2.")
             if (adreno >= 400) addAll(qti)
             if (fireOs) { add("omx.mtk"); add("omx.amlogic") }
@@ -195,6 +196,6 @@ class DecoderSelector(private val ctx: Context) {
             listOf("omx.amlogic", "c2.amlogic") to mapOf("vendor.low-latency.enable" to 1),
         )
 
-        fun MediaCodecInfo.videoCaps(mime: String): VideoCapabilities = getCapabilitiesForType(mime).videoCapabilities
+        fun MediaCodecInfo.videoCaps(mime: String): VideoCapabilities = getCapabilitiesForType(mime).videoCapabilities!!
     }
 }

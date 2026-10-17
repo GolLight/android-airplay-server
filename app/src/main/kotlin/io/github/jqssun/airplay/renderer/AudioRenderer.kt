@@ -49,7 +49,8 @@ class AudioRenderer {
         if (serverHandle == 0L) return
         NativeBridge.nativeServerAudioConfigure(
             serverHandle, config.cushionMs, config.percentilePct, config.oboeBufferFrames,
-            config.forceSwAlac, config.realtimePriority, config.lowLatency, config.benchmarkLog)
+            config.forceSwAlac, config.forceSwAac, config.realtimePriority, config.lowLatency,
+            config.benchmarkLog)
     }
 
     private val debugBuf = java.nio.ByteBuffer.allocateDirect(DEBUG_BUF_BYTES)

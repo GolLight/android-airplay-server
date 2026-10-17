@@ -294,7 +294,7 @@ class VideoRenderer(ctx: Context) {
                         continue
                     }
                     try {
-                        drainOutput(fromPump = true)
+                        drainOutput()
                     } catch (e: Exception) {
                         Log.w(TAG, "Output error, resetting", e)
                         stopCodec()
@@ -314,7 +314,7 @@ class VideoRenderer(ctx: Context) {
     }
 
     @Suppress("DEPRECATION") // INFO_OUTPUT_BUFFERS_CHANGED is still a valid synchronous event.
-    private fun drainOutput(fromPump: Boolean = false) {
+    private fun drainOutput() {
         val c = codec ?: return
         val info = outputInfo
         while (true) {

@@ -35,6 +35,7 @@ struct AudioConfig {
     const int percentilePct;     // adaptive tuner target percentile
     const int oboeBufferFrames;  // 0 = auto, two bursts in low-latency mode, oboe default in power save
     const bool forceSwAlac;      // embedded ffmpeg software ALAC even when HW available
+    const bool forceSwAac;       // embedded ffmpeg software AAC-LC/ELD
     const bool realtimePriority; // decoder: request realtime priority
     const bool lowLatency;       // low-latency decoder + oboe low-latency output
     const bool benchmarkLog;     // periodically log decoder stats
@@ -140,7 +141,8 @@ struct AudioEngine {
             mDecoder = {}; // release old decoder first to free resources
             mDecoder = {ct, wantConfig,
                         makeDecoder(ct, wantConfig.spf, mSampleRate, mChannels, *mTimeline,
-                                    mDecLatency, *mLog, mApplied->forceSwAlac,
+                                    mDecLatency, *mLog,
+                                    ct == CT_ALAC ? mApplied->forceSwAlac : mApplied->forceSwAac,
                                     mApplied->realtimePriority, mApplied->lowLatency)};
             mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
             // codec switch is definitely a discontinuity
@@ -223,10 +225,10 @@ void audio_engine_set_default_stream_values(int sampleRate, int framesPerBurst) 
 }
 
 bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePct,
-                            int oboeBufferFrames, bool forceSwAlac, bool realtimePriority,
-                            bool lowLatency, bool benchmarkLog) {
+                            int oboeBufferFrames, bool forceSwAlac, bool forceSwAac,
+                            bool realtimePriority, bool lowLatency, bool benchmarkLog) {
     if (!engine) return false;
-    return engine->configure({cushionMs, percentilePct, oboeBufferFrames, forceSwAlac,
+    return engine->configure({cushionMs, percentilePct, oboeBufferFrames, forceSwAlac, forceSwAac,
                               realtimePriority, lowLatency, benchmarkLog});
 }
 

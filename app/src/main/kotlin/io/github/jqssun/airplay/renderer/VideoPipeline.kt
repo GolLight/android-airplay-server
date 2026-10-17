@@ -236,10 +236,7 @@ class VideoPipeline {
         surfaceTexture = SurfaceTexture(oesTex).also {
             if (videoW > 0 && videoH > 0) it.setDefaultBufferSize(videoW, videoH)
             it.setOnFrameAvailableListener {
-                synchronized(lock) {
-                    frameAvailable = true
-                    lock.notifyAll()
-                }
+                synchronized(lock) { frameAvailable = true; lock.notifyAll() }
             }
         }
     }

@@ -24,8 +24,8 @@ void audio_engine_set_default_stream_values(int sampleRate, int framesPerBurst);
 
 /* change engine config; any thread */
 bool audio_engine_configure(AudioEngine *engine, int cushionMs, int percentilePct,
-                            int oboeBufferFrames, bool forceSwAlac, bool realtimePriority,
-                            bool lowLatency, bool benchmarkLog);
+                            int oboeBufferFrames, bool forceSwAlac, bool forceSwAac,
+                            bool realtimePriority, bool lowLatency, bool benchmarkLog);
 
 /* sender is switching audio formats */
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf);
